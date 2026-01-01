@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Domain\SSO_IdentityProvider.Domain.csproj" />
+    <ProjectReference Include="..\Infrastructure\SSO_IdentityProvider.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

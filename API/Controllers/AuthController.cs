@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using SSO_IdentityProvider.API.DTOs;
@@ -82,5 +83,18 @@ namespace SSO_IdentityProvider.API.Controllers
                 return StatusCode(StatusCodes.Status500InternalServerError, $"An error occurred: {ex.Message}");
             }
         }
+
+
+        [Authorize]
+        [HttpGet("secure")]
+        public IActionResult Secure()
+        {
+            return Ok(new
+            {
+                User = User.Identity?.Name,
+                Claims = User.Claims.Select(c => new { c.Type, c.Value })
+            });
+        }
+
     }
 }

@@ -2,6 +2,7 @@
 using SSO_IdentityProvider.Domain.Interfaces;
 using SSO_IdentityProvider.Infrastructure.Configuration;
 using System.DirectoryServices.Protocols;
+using System.Net;
 
 namespace SSO_IdentityProvider.Infrastructure.Ldap
 {
@@ -13,6 +14,48 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             _ldapSettings = options.Value;
         }
+
+        public LdapConnection BindAsServiceAccount()
+        {
+            //Console.WriteLine($"{_ldapSettings.Host} : {_ldapSettings.Port} : {_ldapSettings.username} : {_ldapSettings.password} : {_ldapSettings.Domain}");
+            var identifier = new LdapDirectoryIdentifier(
+                    _ldapSettings.Host,
+                    _ldapSettings.Port
+                );
+
+            var username = _ldapSettings.username;
+            var password = _ldapSettings.password;
+
+            // important to only use the username
+            username = username.Contains("@")
+            ? username.Split('@')[0]
+            : username;
+
+
+            var credentials = new System.Net.NetworkCredential(
+                username,
+                password,
+                _ldapSettings.Domain
+            );
+            var connection = new LdapConnection(identifier)
+            {
+                AuthType = AuthType.Negotiate,
+                Credential = credentials
+            };
+
+            if (_ldapSettings.UseSsl)
+            {
+                connection.SessionOptions.SecureSocketLayer = true;
+            }
+
+            connection.SessionOptions.ProtocolVersion = 3;
+
+            connection.Bind();
+
+            return connection;
+        }
+
+
         public async Task<LdapConnection> BindAsUserAsync(string username, string password)
         {
 
@@ -47,12 +90,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 // tells to use LDAPv3 protocol TO connect to the Domain Controller(VM Server)
                 connection.SessionOptions.ProtocolVersion = 3;
 
-
-                Console.WriteLine("Attempting to bind to LDAP server...");
-                Console.WriteLine($"Host: {_ldapSettings.Host}, Port: {_ldapSettings.Port}, User: {username}");
-                Console.WriteLine(connection);
                 connection.Bind();
-
                 return connection;
             });
         }

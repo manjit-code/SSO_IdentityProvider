@@ -10,6 +10,6 @@ namespace SSO_IdentityProvider.Domain.Interfaces
     public interface ILdapAuthenticator
     {
         Task<LdapConnection> BindAsUserAsync(string username, string password);
-
+        LdapConnection BindAsServiceAccount();
     }
 }

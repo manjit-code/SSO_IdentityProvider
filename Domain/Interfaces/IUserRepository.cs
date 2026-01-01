@@ -12,5 +12,9 @@ namespace SSO_IdentityProvider.Domain.Interfaces
     {
         Task<User?> GetByUsernameAsync(LdapConnection connection,string username);
         Task<IEnumerable<string>> GetUserGroupsAsync(LdapConnection connection, string username);
+
+        Task<DirectoryUser?> GetMyProfileAsync(LdapConnection connection, string username);
+
+        Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection, UserSearchCriteria reqBody);
     }
 }

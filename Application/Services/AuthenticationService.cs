@@ -22,13 +22,13 @@ namespace SSO_IdentityProvider.Application.Services
             {
                 throw new UnauthorizedAccessException("Invalid username or password.");
             }
-            Console.WriteLine($"Connection : {connection}");
+            //Console.WriteLine($"Connection : {connection}");
 
             var user = await _userRepository.GetByUsernameAsync(connection, username) ?? throw new UnauthorizedAccessException();
-            Console.WriteLine($"User: {user}");
+            //Console.WriteLine($"User: {user}");
 
             var roles = await _userRepository.GetUserGroupsAsync(connection,username);
-            Console.WriteLine($"Roles: {roles}");
+            //Console.WriteLine($"Roles: {roles}");
 
             return _tokenService.GenerateAccessToken(user, roles);
         }

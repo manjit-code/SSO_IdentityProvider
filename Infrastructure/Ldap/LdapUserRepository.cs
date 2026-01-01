@@ -52,12 +52,135 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        public async Task<IEnumerable<string>> GetUserGroupsAsync(LdapConnection connection,string username)
+        public async Task<DirectoryUser?> GetMyProfileAsync(LdapConnection connection, string username)
+        {
+            return await Task.Run(() =>
+            {
+                var sam = username.Contains("@")
+                    ? username.Split('@')[0]
+                    : username;
+
+                var request = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(sAMAccountName={sam})",
+                    SearchScope.Subtree,
+                    "distinguishedName",
+                    "displayName",
+                    "mail",
+                    "telephoneNumber",
+                    "department",
+                    "title",
+                    "memberOf"
+                );
+
+                var response = (SearchResponse)connection.SendRequest(request);
+                var entry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+
+                if (entry == null) return null;
+
+                var groups = new List<string>();
+                if (entry.Attributes.Contains("memberOf"))
+                {
+                    groups = entry.Attributes["memberOf"]
+                        .GetValues(typeof(string))
+                        .Cast<string>()
+                        .Select(dn => dn.Split(',')[0].Replace("CN=", ""))
+                        .ToList();
+                }
+
+                return new DirectoryUser
+                {
+                    Username = sam,
+                    DistinguishedName = entry.DistinguishedName,
+                    DisplayName = entry.Attributes["displayName"]?[0]?.ToString(),
+                    Email = entry.Attributes["mail"]?[0]?.ToString(),
+                    Phone = entry.Attributes["telephoneNumber"]?[0]?.ToString(),
+                    Department = entry.Attributes["department"]?[0]?.ToString(),
+                    Title = entry.Attributes["title"]?[0]?.ToString(),
+                    Groups = groups
+                };
+            });
+        }
+
+        public async Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection,UserSearchCriteria reqBody)
+        {
+            return await Task.Run(() =>
+            {
+                // 1️⃣ Build LDAP filter
+                var filterParts = new List<string>();
+
+                foreach (var (attribute, rawValue) in reqBody.Filters)
+                {
+                    if (rawValue == "*")
+                    {
+                        filterParts.Add($"({attribute}=*)");
+                        continue;
+                    }
+
+                    var escaped = rawValue
+                        .Replace("\\", "\\5c")
+                        .Replace("*", "\\2a")
+                        .Replace("(", "\\28")
+                        .Replace(")", "\\29")
+                        .Replace("\0", "\\00");
+
+                    filterParts.Add($"({attribute}={escaped})");
+                }
+
+                var ldapFilter = filterParts.Count switch
+                {
+                    0 => "(objectClass=*)",
+                    1 => filterParts[0],
+                    _ => $"(&{string.Join("", filterParts)})"
+                };
+
+                // 2️⃣ LDAP search request
+                var request = new SearchRequest(
+                    reqBody.BaseDn!,
+                    ldapFilter,
+                    reqBody.Scope,
+                    reqBody.Attributes.ToArray()
+                )
+                {
+                    SizeLimit = reqBody.MaxResults
+                };
+
+                var response = (SearchResponse)connection.SendRequest(request);
+                var results = new List<DirectorySearchResult>();
+
+                // 3️⃣ Map results
+                foreach (SearchResultEntry entry in response.Entries)
+                {
+                    var result = new DirectorySearchResult
+                    {
+                        DistinguishedName = entry.DistinguishedName,
+                        Username = entry.Attributes["sAMAccountName"]?[0]?.ToString()
+                                   ?? "Unavailable"
+                    };
+
+                    foreach (var attr in reqBody.Attributes)
+                    {
+                        if (!entry.Attributes.Contains(attr)) continue;
+
+                        var value = entry.Attributes[attr]?[0]?.ToString();
+                        result.Attributes[attr] =
+                            string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+                    }
+
+                    results.Add(result);
+                }
+
+                return results;
+            });
+        }
+
+
+        public async Task<IEnumerable<string>> GetUserGroupsAsync(LdapConnection connection, string username)
         {
             var samAccountName = username.Contains("@")
                     ? username.Split('@')[0]
                     : username;
-            return await Task.Run(() => { 
+            return await Task.Run(() => {
                 var request = new SearchRequest(
                     _ldapSettings.BaseDn,
                     $"(sAMAccountName={samAccountName})",
@@ -86,5 +209,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 return groups;
             });
         }
+          
     }
 }
