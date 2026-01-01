@@ -73,5 +73,20 @@ namespace SSO_IdentityProvider.Application.Services
             var maxResults = Math.Min(request.MaxResults, 100);
             return await _userRepository.SearchUsersAsync(connection, request);
         }
+
+        public async Task UpdateMyProfileAsync(string username, UpdateMyProfile profile)
+        {
+            var connection = _ldapAuthenticator.BindAsServiceAccount();
+
+            var user = await _userRepository.GetByUsernameAsync(connection, username)
+                ?? throw new UnauthorizedAccessException("User not found");
+
+            await _userRepository.UpdateUserProfileAsync(
+                connection,
+                user.DistinguishedName,
+                profile
+            );
+        }
+
     }
 }

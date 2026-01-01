@@ -9,5 +9,6 @@ namespace SSO_IdentityProvider.Domain.Interfaces
     public interface IAuthenticationService
     {
         Task<string> AuthenticateAsync(string username, string password);
+
     }
 }

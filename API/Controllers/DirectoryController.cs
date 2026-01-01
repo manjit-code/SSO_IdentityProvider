@@ -58,5 +58,30 @@ namespace SSO_IdentityProvider.API.Controllers
             var results = await _directoryService.SearchUsersAsync(criteria);
             return Ok(results);
         }
+
+        [HttpPatch("me")]
+        [Authorize]
+        public async Task<IActionResult> UpdateMyProfile([FromBody] UpdateMyProfileRequest request)
+        {
+            var username = User.Identity?.Name;
+            if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
+
+            var domainModel = new UpdateMyProfile
+            {
+                DisplayName = request.DisplayName,
+                TelephoneNumber = request.TelephoneNumber,
+                Mobile = request.Mobile,
+                StreetAddress = request.StreetAddress,
+                City = request.City,
+                State = request.State,
+                PostalCode = request.PostalCode,
+                NewPassword = request.NewPassword
+            };
+
+            await _directoryService.UpdateMyProfileAsync(username, domainModel);
+
+            return NoContent();
+        }
+
     }
 }

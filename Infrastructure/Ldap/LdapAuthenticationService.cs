@@ -94,5 +94,31 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 return connection;
             });
         }
+
+        public LdapConnection BindAsServiceAccountForPassword()
+        {
+            var identifier = new LdapDirectoryIdentifier(
+                _ldapSettings.Host,
+                _ldapSettings.PortS,
+                _ldapSettings.UseSslS,
+                false               
+            );
+
+            var connection = new LdapConnection(identifier)
+            {
+                // Negotiate is more secure and native to Windows AD than Basic
+                AuthType = AuthType.Negotiate,
+                Credential = new NetworkCredential(_ldapSettings.username, _ldapSettings.password)
+            };
+
+            connection.SessionOptions.ProtocolVersion = 3;
+            connection.SessionOptions.SecureSocketLayer = true;
+
+            // Add this if your VM certificate isn't installed on your host machine
+            connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
+
+            connection.Bind();
+            return connection;
+        }
     }
 }

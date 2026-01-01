@@ -15,9 +15,11 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
     public class LdapUserRepository : IUserRepository
     {
         private readonly LdapSettings _ldapSettings;
-        public LdapUserRepository(IOptions<LdapSettings> option)
+        private readonly ILdapAuthenticator _ldapAuthenticator;
+        public LdapUserRepository(IOptions<LdapSettings> option, ILdapAuthenticator ldapAuthenticator)
         {
             _ldapSettings = option.Value;
+            _ldapAuthenticator = ldapAuthenticator;
         }
 
         public async Task<User?> GetByUsernameAsync(LdapConnection connection, string username)
@@ -209,6 +211,73 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 return groups;
             });
         }
-          
+
+        public async Task UpdateUserProfileAsync(LdapConnection connection,string userDn,UpdateMyProfile profile)
+        {
+            await Task.Run(() =>
+            {
+                var serviceConnection = _ldapAuthenticator.BindAsServiceAccountForPassword();
+                var modifications = new List<DirectoryAttributeModification>();
+                connection = serviceConnection;
+                void ReplaceIfProvided(string attr, string? value)
+                {
+                    if (string.IsNullOrWhiteSpace(value)) return;
+
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = attr,
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    mod.Add(value);
+                    modifications.Add(mod);
+                }
+
+                ReplaceIfProvided("displayName", profile.DisplayName);
+                ReplaceIfProvided("telephoneNumber", profile.TelephoneNumber);
+                ReplaceIfProvided("mobile", profile.Mobile);
+                ReplaceIfProvided("streetAddress", profile.StreetAddress);
+                ReplaceIfProvided("l", profile.City);
+                ReplaceIfProvided("st", profile.State);
+                ReplaceIfProvided("postalCode", profile.PostalCode);
+
+                if (modifications.Any())
+                {
+                    var modifyRequest = new ModifyRequest(userDn, modifications.ToArray());
+                    connection.SendRequest(modifyRequest);
+                }
+
+                if (!string.IsNullOrWhiteSpace(profile.NewPassword))
+                {
+                    
+                    ChangePassword(serviceConnection, userDn, profile.NewPassword);
+                }
+            });
+        }
+
+        private static void ChangePassword(LdapConnection connection, string userDn, string newPassword)
+        {
+            try
+            {
+                var pwdBytes = Encoding.Unicode.GetBytes($"\"{newPassword}\"");
+
+                var mod = new DirectoryAttributeModification
+                {
+                    Name = "unicodePwd",
+                    Operation = DirectoryAttributeOperation.Replace
+                };
+                mod.Add(pwdBytes);
+
+                var request = new ModifyRequest(userDn, mod);
+                connection.SendRequest(request);
+            }
+            catch (DirectoryOperationException ex)
+            {
+                throw new InvalidOperationException(
+                    "Password does not meet domain password policy.",
+                    ex
+                );
+            }
+        }
+
     }
 }
