@@ -216,7 +216,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             await Task.Run(() =>
             {
-                var serviceConnection = _ldapAuthenticator.BindAsServiceAccountForPassword();
+                var serviceConnection = _ldapAuthenticator.BindAsServiceAccountForWrite();
                 var modifications = new List<DirectoryAttributeModification>();
                 connection = serviceConnection;
                 void ReplaceIfProvided(string attr, string? value)
@@ -232,6 +232,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     modifications.Add(mod);
                 }
 
+                
                 ReplaceIfProvided("displayName", profile.DisplayName);
                 ReplaceIfProvided("telephoneNumber", profile.TelephoneNumber);
                 ReplaceIfProvided("mobile", profile.Mobile);
@@ -279,5 +280,47 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
+        public async Task<string> CreateUserAsync(LdapConnection connection, CreateUserCommand newUser)
+        {
+            return await Task.Run(() =>
+            {
+                // check if user already exists
+                var existingUser = GetByUsernameAsync(connection, newUser.FullName).Result;
+                if (existingUser != null)
+                {
+                    throw new InvalidOperationException("User already exists with same Name.");
+                }
+
+                // get the DepartmentOu 
+                var ouRequest = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(ou={newUser.DepartmentOu})",
+                    SearchScope.Subtree,
+                    "distinguishedName"
+                );
+
+                var serviceConnection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+                connection = serviceConnection;
+                var samAccountName = GenerateSamAccountName(newUser.FullName);
+                var userDn = $"CN={newUser.FullName},{newUser.DepartmentOu},{_ldapSettings.BaseDn}";
+                var attributes = new List<DirectoryAttribute>
+                {
+                    new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "user" }),
+                    new DirectoryAttribute("cn", newUser.FullName),
+                    new DirectoryAttribute("sAMAccountName", samAccountName),
+                    new DirectoryAttribute("userPrincipalName", $"{samAccountName}@{_ldapSettings.Domain}"),
+                    new DirectoryAttribute("displayName", newUser.FullName),
+                    new DirectoryAttribute("department", newUser.DepartmentOu),
+                    new DirectoryAttribute("title", newUser.Title),
+                    new DirectoryAttribute("manager", newUser.ManagerDn),
+                    new DirectoryAttribute("telephoneNumber", newUser.TelephoneNumber)
+                };
+                var addRequest = new AddRequest(userDn, attributes.ToArray());
+                connection.SendRequest(addRequest);
+                // Optionally set password and enable account here
+                return userDn;
+            });
+            throw new NotImplementedException();
+        }
     }
 }

@@ -50,11 +50,9 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 // Configuration Binding
-builder.Services.Configure<LdapSettings>(
-    builder.Configuration.GetSection("LdapSettings"));
+builder.Services.Configure<LdapSettings>( builder.Configuration.GetSection("LdapSettings"));
 
-builder.Services.Configure<JwtSettings>(
-    builder.Configuration.GetSection("JwtSettings"));
+builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
 
 // Dependency Injection
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();

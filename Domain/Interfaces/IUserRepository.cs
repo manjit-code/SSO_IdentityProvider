@@ -18,5 +18,7 @@ namespace SSO_IdentityProvider.Domain.Interfaces
         Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection, UserSearchCriteria reqBody);
 
         Task UpdateUserProfileAsync(LdapConnection connection, string userDn, UpdateMyProfile profile);
+
+        Task<String> CreateUserAsync(LdapConnection connection, CreateUserCommand newUser);
     }
 }

@@ -26,24 +26,6 @@ namespace SSO_IdentityProvider.Application.Services
             _ldapAuthenticator = ldapAuthenticator;
         }
 
-        // Helper methods
-        private static string GetOrUnavailable(Dictionary<string, string> attrs, string key)
-        {
-            return attrs.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
-                ? value
-                : "Unavailable";
-        }
-
-        private static string ResolveManagerName(Dictionary<string, string> attrs)
-        {
-            if (!attrs.TryGetValue("manager", out var dn) || string.IsNullOrWhiteSpace(dn))
-                return "Unavailable";
-
-            var cnPart = dn.Split(',').FirstOrDefault(p => p.StartsWith("CN="));
-            return cnPart?.Replace("CN=", "") ?? "Unavailable";
-        }
-
-
         public async Task<DirectoryUser> GetMyProfileAsync(string username)
         {
             var connection = _ldapAuthenticator.BindAsServiceAccount();
@@ -87,6 +69,5 @@ namespace SSO_IdentityProvider.Application.Services
                 profile
             );
         }
-
     }
 }

@@ -95,7 +95,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        public LdapConnection BindAsServiceAccountForPassword()
+        public LdapConnection BindAsServiceAccountForWrite()
         {
             var identifier = new LdapDirectoryIdentifier(
                 _ldapSettings.Host,
@@ -106,7 +106,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             var connection = new LdapConnection(identifier)
             {
-                // Negotiate is more secure and native to Windows AD than Basic
                 AuthType = AuthType.Negotiate,
                 Credential = new NetworkCredential(_ldapSettings.username, _ldapSettings.password)
             };

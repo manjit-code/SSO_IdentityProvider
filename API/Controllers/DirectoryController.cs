@@ -1,9 +1,11 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using SSO_IdentityProvider.API.DTOs;
 using SSO_IdentityProvider.Application.Services;
 using SSO_IdentityProvider.Domain.Entities;
+using SSO_IdentityProvider.Infrastructure.Configuration;
 using System.DirectoryServices.Protocols;
 using System.Security.Claims;
 
@@ -15,12 +17,16 @@ namespace SSO_IdentityProvider.API.Controllers
     public class DirectoryController : ControllerBase
     {
         private readonly DirectoryService _directoryService;
-
-        public DirectoryController(DirectoryService directoryService)
+        private readonly LdapSettings _ldapSettings;
+        public DirectoryController(DirectoryService directoryService, IOptions<LdapSettings> Options)
         {
             _directoryService = directoryService;
+            _ldapSettings = Options.Value;
+
+            Console.WriteLine($"LDAP Settings in Controller: {_ldapSettings.Host} : {_ldapSettings.Port} : {_ldapSettings.username} : {_ldapSettings.Domain}");
         }
 
+        
         [HttpGet("me")]
         public async Task<IActionResult> GetMyProfile()
         {
@@ -38,21 +44,15 @@ namespace SSO_IdentityProvider.API.Controllers
         [Authorize]
         public async Task<IActionResult> SearchUsers([FromBody] SearchUsersRequest request)
         {
-            if (request.IncludeAttributes == null || !request.IncludeAttributes.Any())
-                return BadRequest("Attributes are required.");
-
-            if (!Enum.TryParse<SearchScope>(request.Scope,ignoreCase: true,out var scope))
-            {
-                return BadRequest("Invalid scope. Use Base | OneLevel | Subtree.");
-            }
-
             var criteria = new UserSearchCriteria
             {
-                BaseDn = request.BaseDn,
-                Filters = request.Filters ?? new(),
-                Attributes = request.IncludeAttributes,
-                Scope = scope,
-                MaxResults = request.MaxResults <= 0 ? 50 : request.MaxResults
+                BaseDn = _ldapSettings.BaseDn,
+                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> {{ "objectClass", "user" }},
+                Attributes = request.IncludeAttributes?.Any() == true
+                 ? request.IncludeAttributes
+                 : new List<string> { "cn", "sAMAccountName", "mobile", "mail", "distinguishedName", "memberOf" },
+                Scope = SearchScope.Subtree,
+                MaxResults = Math.Clamp(request.MaxResults, 1, 100)
             };
 
             var results = await _directoryService.SearchUsersAsync(criteria);
@@ -63,7 +63,7 @@ namespace SSO_IdentityProvider.API.Controllers
         [Authorize]
         public async Task<IActionResult> UpdateMyProfile([FromBody] UpdateMyProfileRequest request)
         {
-            var username = User.Identity?.Name;
+            var username = User.Identity?.Name; // from the token sent in the Header
             if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
 
             var domainModel = new UpdateMyProfile

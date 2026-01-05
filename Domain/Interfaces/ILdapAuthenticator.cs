@@ -12,6 +12,6 @@ namespace SSO_IdentityProvider.Domain.Interfaces
         Task<LdapConnection> BindAsUserAsync(string username, string password);
         LdapConnection BindAsServiceAccount();
 
-        LdapConnection BindAsServiceAccountForPassword();
+        LdapConnection BindAsServiceAccountForWrite();
     }
 }
