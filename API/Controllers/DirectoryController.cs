@@ -26,7 +26,7 @@ namespace SSO_IdentityProvider.API.Controllers
             Console.WriteLine($"LDAP Settings in Controller: {_ldapSettings.Host} : {_ldapSettings.Port} : {_ldapSettings.username} : {_ldapSettings.Domain}");
         }
 
-        
+
         [HttpGet("me")]
         public async Task<IActionResult> GetMyProfile()
         {
@@ -47,7 +47,7 @@ namespace SSO_IdentityProvider.API.Controllers
             var criteria = new UserSearchCriteria
             {
                 BaseDn = _ldapSettings.BaseDn,
-                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> {{ "objectClass", "user" }},
+                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> { { "objectClass", "user" } },
                 Attributes = request.IncludeAttributes?.Any() == true
                  ? request.IncludeAttributes
                  : new List<string> { "cn", "sAMAccountName", "mobile", "mail", "distinguishedName", "memberOf" },
@@ -70,7 +70,6 @@ namespace SSO_IdentityProvider.API.Controllers
             {
                 DisplayName = request.DisplayName,
                 TelephoneNumber = request.TelephoneNumber,
-                Mobile = request.Mobile,
                 StreetAddress = request.StreetAddress,
                 City = request.City,
                 State = request.State,
@@ -83,5 +82,26 @@ namespace SSO_IdentityProvider.API.Controllers
             return NoContent();
         }
 
+
+        [HttpPost("new-user")]
+        [Authorize]
+        public async Task<IActionResult> CreateUser([FromBody] CreateUserRequest request)
+        {
+            var domainModel = new CreateUserCommand
+            {
+                FullName = request.FullName,
+                Department = request.Department,
+                Title = request.Title,
+                ManagerEmail = request.ManagerEmail,
+                TelephoneNumber = request.TelephoneNumber,
+                City = request.City,
+                State = request.State,
+                Country = request.Country,
+                PostalCode = request.PostalCode,
+                StreetAddress = request.StreetAddress
+            };
+            var userDn = await _directoryService.CreateUserAsync(domainModel);
+            return Ok(userDn);
+        }
     }
 }

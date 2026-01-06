@@ -19,7 +19,7 @@ namespace SSO_IdentityProvider.Application.Services
         private readonly LdapSettings _settings;
         private readonly ILdapAuthenticator _ldapAuthenticator;
 
-        public DirectoryService(IUserRepository userRepository,IOptions<LdapSettings> options, ILdapAuthenticator ldapAuthenticator)
+        public DirectoryService(IUserRepository userRepository, IOptions<LdapSettings> options, ILdapAuthenticator ldapAuthenticator)
         {
             _userRepository = userRepository;
             _settings = options.Value;
@@ -63,11 +63,18 @@ namespace SSO_IdentityProvider.Application.Services
             var user = await _userRepository.GetByUsernameAsync(connection, username)
                 ?? throw new UnauthorizedAccessException("User not found");
 
-            await _userRepository.UpdateUserProfileAsync(
-                connection,
-                user.DistinguishedName,
-                profile
-            );
+            await _userRepository.UpdateUserProfileAsync(user.DistinguishedName,profile);
+        }
+
+        public async Task<CreateUserResponse> CreateUserAsync(CreateUserCommand newUser)
+        {
+            var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+            if (connection == null)
+            {
+                throw new UnauthorizedAccessException("Invalid Service Account Credential.");
+            }
+            var userDn = await _userRepository.CreateUserAsync(newUser);
+            return userDn;
         }
     }
 }
