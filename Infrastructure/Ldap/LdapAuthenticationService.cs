@@ -61,37 +61,57 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             return await Task.Run(() =>
             {
-                var identifier = new LdapDirectoryIdentifier(
-                    _ldapSettings.Host, 
-                    _ldapSettings.Port
-                );
-
-                // important to only use the username
-                username = username.Contains("@")
-                ? username.Split('@')[0]
-                : username;
-
-                var credentials = new System.Net.NetworkCredential(
-                    username,
-                    password,
-                    _ldapSettings.Domain
-                );
-                var connection = new LdapConnection(identifier)
+                try
                 {
-                    AuthType = AuthType.Negotiate,
-                    Credential = credentials
-                };
+                    var identifier = new LdapDirectoryIdentifier(
+                        _ldapSettings.Host,
+                        _ldapSettings.Port
+                    );
 
-                if(_ldapSettings.UseSsl)
-                {
-                    connection.SessionOptions.SecureSocketLayer = true;
+                    // important to only use the username
+                    username = username.Contains("@")
+                    ? username.Split('@')[0]
+                    : username;
+
+                    var credentials = new System.Net.NetworkCredential(
+                        username,
+                        password,
+                        _ldapSettings.Domain
+                    );
+                    var connection = new LdapConnection(identifier)
+                    {
+                        AuthType = AuthType.Negotiate,
+                        Credential = credentials
+                    };
+
+                    if (_ldapSettings.UseSsl)
+                    {
+                        connection.SessionOptions.SecureSocketLayer = true;
+                    }
+
+                    // tells to use LDAPv3 protocol TO connect to the Domain Controller(VM Server)
+                    connection.SessionOptions.ProtocolVersion = 3;
+
+                    connection.Bind();
+                    return connection;
                 }
+                catch (LdapException ldapEx)
+                {
+                    Console.WriteLine($"LDAP Bind Error: {ldapEx.ErrorCode} - {ldapEx.Message}");
 
-                // tells to use LDAPv3 protocol TO connect to the Domain Controller(VM Server)
-                connection.SessionOptions.ProtocolVersion = 3;
+                    // Error 49 = Invalid credentials or disabled account
+                    if (ldapEx.ErrorCode == 49)
+                    {
+                        throw new UnauthorizedAccessException("Credentials are wrong.");
+                    }
 
-                connection.Bind();
-                return connection;
+                    throw new UnauthorizedAccessException($"LDAP authentication failed: {ldapEx.Message}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"General Bind Error: {ex.Message}");
+                    throw new UnauthorizedAccessException("Authentication failed. Please try again.");
+                }
             });
         }
 

@@ -103,5 +103,37 @@ namespace SSO_IdentityProvider.API.Controllers
             var userDn = await _directoryService.CreateUserAsync(domainModel);
             return Ok(userDn);
         }
+
+        [HttpPatch("admin-update")]
+        [Authorize] 
+        public async Task<IActionResult> AdminUpdateUser([FromBody] AdminUpdateUserRequest request)
+        {
+            var command = new AdminUpdateUserCommand
+            {
+                Email = request.Email,
+                Department = request.Department,
+                Title = request.Title,
+                ManagerEmail = request.ManagerEmail
+            };
+
+            await _directoryService.UpdateUserAsAdminAsync(command);
+            return NoContent();
+        }
+
+        [HttpPatch("status")]
+        [Authorize]
+        public async Task<IActionResult> UpdateUserStatus([FromBody] UpdateUserStatusRequest request)
+        {
+            var command = new UpdateUserStatusCommand
+            {
+                Email = request.Email,
+                IsEnabled = request.IsEnabled
+            };
+
+            await _directoryService.UpdateUserStatusAsync(command);
+
+            return NoContent();
+        }
+
     }
 }

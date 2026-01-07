@@ -514,5 +514,159 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             if (ouEntry == null) throw new InvalidOperationException("Department OU does not exist.");
             return ouEntry.DistinguishedName;
         }
+
+        public async Task UpdateUserAsAdminAsync(AdminUpdateUserCommand command)
+        {
+            await Task.Run(() =>
+            {
+                var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+                // 1️. Resolve user DN
+                var userDn = FindUserDnByEmail(connection, command.Email) ?? throw new InvalidOperationException("Target user not found.");
+
+                // 2️. Handle department change: OU move
+                if (!string.IsNullOrWhiteSpace(command.Department))
+                {
+                    var targetOuDn = GetDepartmentOuDnAsync(connection,command.Department);
+                    MoveUserToOu(connection, userDn, targetOuDn);
+
+                    // After move, DN changes: recompute
+                    userDn = $"CN={ExtractCn(userDn)},{targetOuDn}";
+                }
+
+                var modifications = new List<DirectoryAttributeModification>();
+
+                void ReplaceIfProvided(string attr, string? value)
+                {
+                    if (string.IsNullOrWhiteSpace(value)) return;
+
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = attr,
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    mod.Add(value);
+                    modifications.Add(mod);
+                }
+
+                ReplaceIfProvided("department", command.Department);
+                ReplaceIfProvided("title", command.Title);
+
+                // 3️. Manager assignment
+                if (!string.IsNullOrWhiteSpace(command.ManagerEmail))
+                {
+                    var managerDn = FindUserDnByEmail(connection, command.ManagerEmail)
+                        ?? throw new InvalidOperationException("Manager not found.");
+
+                    if (string.Equals(managerDn, userDn, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("User cannot be their own manager.");
+
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = "manager",
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    mod.Add(managerDn);
+                    modifications.Add(mod);
+                }
+
+                if (modifications.Any())
+                {
+                    connection.SendRequest(new ModifyRequest(userDn, modifications.ToArray()));
+                }
+            });
+        }
+        private static string ExtractCn(string userDn)
+        {
+            return userDn.Split(',')[0].Replace("CN=", "");
+        }
+
+        private string? FindUserDnByEmail(LdapConnection connection, string email)
+        {
+            var request = new SearchRequest(
+                _ldapSettings.BaseDn,
+                $"(|(mail={Escape(email)})(userPrincipalName={Escape(email)}))",
+                SearchScope.Subtree,
+                "distinguishedName"
+            );
+
+            var response = (SearchResponse)connection.SendRequest(request);
+            return response.Entries.Cast<SearchResultEntry>().FirstOrDefault()?.DistinguishedName;
+        }
+        private static string GetParentOuDn(string userDn)
+        {
+            var index = userDn.IndexOf(",");
+            if (index == -1) throw new InvalidOperationException("Invalid DN format.");
+
+            return userDn.Substring(index + 1);
+        }
+        private void MoveUserToOu(LdapConnection connection,string userDn,string targetOuDn)
+        {
+            var currentParentDn = GetParentOuDn(userDn);
+
+            // If already in target OU → do nothing
+            if (string.Equals(currentParentDn, targetOuDn, StringComparison.OrdinalIgnoreCase)) return;
+
+            var rdn = userDn.Split(',')[0];
+
+            var request = new ModifyDNRequest(userDn,targetOuDn,rdn)
+            {
+                DeleteOldRdn = true
+            };
+
+            connection.SendRequest(request);
+        }
+
+        public async Task UpdateUserStatusAsync(UpdateUserStatusCommand command)
+        {
+            await Task.Run(() =>
+            {
+                var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+                var userDn = FindUserDn(connection, command.Email)
+                    ?? throw new InvalidOperationException("User not found.");
+
+                var currentUac = GetUserAccountControl(connection, userDn);
+
+                const int ACCOUNTDISABLE = 0x0002;
+
+                int newUac = command.IsEnabled
+                    ? currentUac & ~ACCOUNTDISABLE   // Enable
+                    : currentUac | ACCOUNTDISABLE;   // Disable
+
+                // Idempotency: no-op if already in desired state
+                if (currentUac == newUac)
+                    return;
+
+                var mod = new DirectoryAttributeModification
+                {
+                    Name = "userAccountControl",
+                    Operation = DirectoryAttributeOperation.Replace
+                };
+                mod.Add(newUac.ToString());
+
+                connection.SendRequest(
+                    new ModifyRequest(userDn, mod)
+                );
+            });
+        }
+
+        private int GetUserAccountControl(LdapConnection connection, string userDn)
+        {
+            var request = new SearchRequest(
+                userDn,
+                "(objectClass=user)",
+                SearchScope.Base,
+                "userAccountControl"
+            );
+
+            var response = (SearchResponse)connection.SendRequest(request);
+
+            var entry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault()
+                ?? throw new InvalidOperationException("User not found.");
+
+            return int.Parse(entry.Attributes["userAccountControl"][0].ToString()!);
+        }
+
     }
 }

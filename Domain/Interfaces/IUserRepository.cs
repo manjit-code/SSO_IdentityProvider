@@ -20,5 +20,9 @@ namespace SSO_IdentityProvider.Domain.Interfaces
         Task UpdateUserProfileAsync(string userDn, UpdateMyProfile profile);
 
         Task<CreateUserResponse> CreateUserAsync(CreateUserCommand newUser);
+
+        Task UpdateUserAsAdminAsync(AdminUpdateUserCommand command);
+        Task UpdateUserStatusAsync(UpdateUserStatusCommand command);
+
     }
 }

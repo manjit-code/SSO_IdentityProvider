@@ -76,5 +76,20 @@ namespace SSO_IdentityProvider.Application.Services
             var userDn = await _userRepository.CreateUserAsync(newUser);
             return userDn;
         }
+
+        public async Task UpdateUserAsAdminAsync(AdminUpdateUserCommand command)
+        {
+            await _userRepository.UpdateUserAsAdminAsync(command);
+        }
+
+        public async Task UpdateUserStatusAsync(UpdateUserStatusCommand command)
+        {
+            var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+            if (connection == null)
+                throw new UnauthorizedAccessException("Invalid service account.");
+
+            await _userRepository.UpdateUserStatusAsync(command);
+        }
+
     }
 }
