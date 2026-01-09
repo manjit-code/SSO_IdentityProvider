@@ -136,7 +136,7 @@ namespace SSO_IdentityProvider.API.Controllers
         }
 
 
-        [HttpPost("add-Ou")]
+        [HttpPost("add-ou")]
         [Authorize]
         public async Task<IActionResult> CreateOu([FromBody] CreateOuCommand request)
         {
@@ -149,7 +149,7 @@ namespace SSO_IdentityProvider.API.Controllers
             return NoContent();
         }
 
-        [HttpDelete("remove-Ou")]
+        [HttpDelete("remove-ou")]
         [Authorize]
         public async Task<IActionResult> DeleteOu([FromBody] DeleteOuCommand request)
         {

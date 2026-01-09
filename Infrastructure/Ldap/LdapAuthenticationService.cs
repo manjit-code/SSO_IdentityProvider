@@ -57,7 +57,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         }
 
 
-        public async Task<LdapConnection> BindAsUserAsync(string username, string password)
+        public async Task<LdapConnection?> BindAsUserAsync(string username, string password)
         {
 
             return await Task.Run(() =>
@@ -96,17 +96,11 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     connection.Bind();
                     return connection;
                 }
-                catch (LdapException ldapEx)
+                catch (LdapException ldapEx) when (ldapEx.ErrorCode == 49)
                 {
                     Console.WriteLine($"LDAP Bind Error: {ldapEx.ErrorCode} - {ldapEx.Message}");
 
-                    // Error 49 = Invalid credentials or disabled account
-                    if (ldapEx.ErrorCode == 49)
-                    {
-                        throw new UnauthorizedAccessException("Credentials are wrong.");
-                    }
-
-                    throw new UnauthorizedAccessException($"LDAP authentication failed: {ldapEx.Message}");
+                    return null;
                 }
                 catch (Exception ex)
                 {
