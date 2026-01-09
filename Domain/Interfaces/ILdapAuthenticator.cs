@@ -13,5 +13,6 @@ namespace SSO_IdentityProvider.Domain.Interfaces
         LdapConnection BindAsServiceAccount();
 
         LdapConnection BindAsServiceAccountForWrite();
+        LdapConnection BindAsInfraServiceAccountForWrite();
     }
 }

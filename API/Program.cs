@@ -54,6 +54,8 @@ builder.Services.Configure<LdapSettings>( builder.Configuration.GetSection("Ldap
 
 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
 
+builder.Services.Configure<LdapInfraSettings>(builder.Configuration.GetSection("LdapInfraSettings"));
+
 // Dependency Injection
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 builder.Services.AddScoped<ILdapAuthenticator, LdapAuthenticationService>();

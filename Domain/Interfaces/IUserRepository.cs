@@ -24,5 +24,7 @@ namespace SSO_IdentityProvider.Domain.Interfaces
         Task UpdateUserAsAdminAsync(AdminUpdateUserCommand command);
         Task UpdateUserStatusAsync(UpdateUserStatusCommand command);
 
+        Task CreateOuAsync(CreateOuCommand command);
+        Task DeleteOuAsync(DeleteOuCommand command);
     }
 }

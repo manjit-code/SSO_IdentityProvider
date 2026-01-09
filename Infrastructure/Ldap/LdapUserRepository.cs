@@ -635,8 +635,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     : currentUac | ACCOUNTDISABLE;   // Disable
 
                 // Idempotency: no-op if already in desired state
-                if (currentUac == newUac)
-                    return;
+                if (currentUac == newUac) return;
 
                 var mod = new DirectoryAttributeModification
                 {
@@ -666,6 +665,88 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 ?? throw new InvalidOperationException("User not found.");
 
             return int.Parse(entry.Attributes["userAccountControl"][0].ToString()!);
+        }
+
+        public async Task CreateOuAsync(CreateOuCommand command)
+        {
+            await Task.Run(() =>
+            {
+                //var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
+
+                var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
+                if (string.IsNullOrWhiteSpace(command.NewOuName))
+                {
+                    throw new InvalidOperationException("OU name is required");
+                }
+                var ouDn = $"OU={command.NewOuName},{command.ParentOuDn}";
+
+                var existOuRequest = new SearchRequest(
+                    command.ParentOuDn,
+                    $"ou={Escape(command.NewOuName)}",
+                    SearchScope.OneLevel,
+                    "distinguishedName"
+                );
+
+                var existOuResponse = (SearchResponse)connection.SendRequest(existOuRequest);
+                if (existOuResponse.Entries.Count > 0) throw new InvalidOperationException("OU with same name already exists");
+
+                var attr = new DirectoryAttribute[] {new DirectoryAttribute("objectClass", "organizationalUnit"),
+                                                 new DirectoryAttribute("ou", command.NewOuName)   };
+                var addRequest = new AddRequest(ouDn, attr);
+
+                connection.SendRequest(addRequest);
+            });
+        }
+
+        public async Task DeleteOuAsync(DeleteOuCommand command)
+        {
+            await Task.Run(() =>
+            {
+                //var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
+                var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
+                // Check for child objects
+                var childRequest = new SearchRequest(
+                    command.OuDn,
+                    "(objectClass=*)",
+                    SearchScope.OneLevel,
+                    "distinguishedName"
+                );
+
+                var childResponse = (SearchResponse)connection.SendRequest(childRequest);
+
+                if (childResponse.Entries.Count > 0 && !command.CascadeDelete)
+                {
+                    throw new InvalidOperationException(
+                        "OU contains child objects. Enable CascadeDelete to proceed."
+                    );
+                }
+
+                if (command.CascadeDelete)
+                {
+                    DeleteChildrenRecursively(connection, command.OuDn);
+                }
+
+                // Delete the OU itself
+                connection.SendRequest(new DeleteRequest(command.OuDn));
+            });
+        }
+        private void DeleteChildrenRecursively(LdapConnection connection, string parentDn)
+        {
+            var searchRequest = new SearchRequest(
+                parentDn,
+                "(objectClass=*)",
+                SearchScope.OneLevel,
+                "distinguishedName"
+            );
+
+            var response = (SearchResponse)connection.SendRequest(searchRequest);
+
+            foreach (SearchResultEntry entry in response.Entries)
+            {
+                DeleteChildrenRecursively(connection, entry.DistinguishedName);
+
+                connection.SendRequest(new DeleteRequest(entry.DistinguishedName));
+            }
         }
 
     }

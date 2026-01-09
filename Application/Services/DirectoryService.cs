@@ -90,6 +90,14 @@ namespace SSO_IdentityProvider.Application.Services
 
             await _userRepository.UpdateUserStatusAsync(command);
         }
+        public async Task CreateOuAsync(CreateOuCommand command)
+        {
+            await _userRepository.CreateOuAsync(command);
+        }
 
+        public async Task DeleteOuAsync(DeleteOuCommand command)
+        {
+            await _userRepository.DeleteOuAsync(command);
+        }
     }
 }

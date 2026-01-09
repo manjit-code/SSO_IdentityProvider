@@ -9,10 +9,11 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
     public class LdapAuthenticationService : ILdapAuthenticator
     {
         private readonly LdapSettings _ldapSettings;
-
-        public LdapAuthenticationService(IOptions<LdapSettings> options)
+        private readonly LdapInfraSettings _ldapInfraSettings;
+        public LdapAuthenticationService(IOptions<LdapSettings> options, IOptions<LdapInfraSettings> opt)
         {
             _ldapSettings = options.Value;
+            _ldapInfraSettings = opt.Value;
         }
 
         public LdapConnection BindAsServiceAccount()
@@ -68,7 +69,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         _ldapSettings.Port
                     );
 
-                    // important to only use the username
+                    //important to only use the username
                     username = username.Contains("@")
                     ? username.Split('@')[0]
                     : username;
@@ -131,6 +132,31 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             };
 
             connection.SessionOptions.ProtocolVersion = 3;
+            connection.SessionOptions.SecureSocketLayer = true;
+
+            // Add this if your VM certificate isn't installed on your host machine
+            connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
+
+            connection.Bind();
+            return connection;
+        }
+
+        public LdapConnection BindAsInfraServiceAccountForWrite()
+        {
+            var identifier = new LdapDirectoryIdentifier(
+                _ldapInfraSettings.Host,
+                _ldapInfraSettings.Port,
+                _ldapInfraSettings.UseSsl,
+                false
+            );
+
+        var connection = new LdapConnection(identifier)
+        {
+            AuthType = AuthType.Negotiate,
+            Credential = new NetworkCredential(_ldapInfraSettings.Username, _ldapInfraSettings.Password)
+        };
+
+        connection.SessionOptions.ProtocolVersion = 3;
             connection.SessionOptions.SecureSocketLayer = true;
 
             // Add this if your VM certificate isn't installed on your host machine

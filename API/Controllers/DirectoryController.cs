@@ -59,7 +59,7 @@ namespace SSO_IdentityProvider.API.Controllers
             return Ok(results);
         }
 
-        [HttpPatch("me")]
+        [HttpPatch("update-my-profile")]
         [Authorize]
         public async Task<IActionResult> UpdateMyProfile([FromBody] UpdateMyProfileRequest request)
         {
@@ -83,7 +83,7 @@ namespace SSO_IdentityProvider.API.Controllers
         }
 
 
-        [HttpPost("new-user")]
+        [HttpPost("add-new-user")]
         [Authorize]
         public async Task<IActionResult> CreateUser([FromBody] CreateUserRequest request)
         {
@@ -120,7 +120,7 @@ namespace SSO_IdentityProvider.API.Controllers
             return NoContent();
         }
 
-        [HttpPatch("status")]
+        [HttpPatch("update-status")]
         [Authorize]
         public async Task<IActionResult> UpdateUserStatus([FromBody] UpdateUserStatusRequest request)
         {
@@ -131,6 +131,33 @@ namespace SSO_IdentityProvider.API.Controllers
             };
 
             await _directoryService.UpdateUserStatusAsync(command);
+
+            return NoContent();
+        }
+
+
+        [HttpPost("add-Ou")]
+        [Authorize]
+        public async Task<IActionResult> CreateOu([FromBody] CreateOuCommand request)
+        {
+            await _directoryService.CreateOuAsync(new CreateOuCommand
+            {
+                ParentOuDn = request.ParentOuDn,
+                NewOuName = request.NewOuName
+            });
+
+            return NoContent();
+        }
+
+        [HttpDelete("remove-Ou")]
+        [Authorize]
+        public async Task<IActionResult> DeleteOu([FromBody] DeleteOuCommand request)
+        {
+            await _directoryService.DeleteOuAsync(new DeleteOuCommand
+            {
+                OuDn = request.OuDn,
+                CascadeDelete = request.CascadeDelete
+            });
 
             return NoContent();
         }
