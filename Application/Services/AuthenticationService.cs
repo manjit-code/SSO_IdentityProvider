@@ -18,7 +18,7 @@ namespace SSO_IdentityProvider.Application.Services
         {
             // follows separation of concerns
             var connection = await _ldapAuthenticator.BindAsUserAsync(username, password);
-            if(connection == null)
+            if (connection == null)
             {
                 throw new UnauthorizedAccessException("Invalid username or password.");
             }
@@ -27,7 +27,7 @@ namespace SSO_IdentityProvider.Application.Services
             var user = await _userRepository.GetByUsernameAsync(connection, username) ?? throw new UnauthorizedAccessException();
             //Console.WriteLine($"User: {user}");
 
-            var roles = await _userRepository.GetUserGroupsAsync(connection,username);
+            var roles = await _userRepository.GetUserGroupsAsync(connection, username);
             //Console.WriteLine($"Roles: {roles}");
 
             return _tokenService.GenerateAccessToken(user, roles);

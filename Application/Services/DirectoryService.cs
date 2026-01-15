@@ -63,7 +63,7 @@ namespace SSO_IdentityProvider.Application.Services
             var user = await _userRepository.GetByUsernameAsync(connection, username)
                 ?? throw new UnauthorizedAccessException("User not found");
 
-            await _userRepository.UpdateUserProfileAsync(user.DistinguishedName,profile);
+            await _userRepository.UpdateUserProfileAsync(user.DistinguishedName, profile);
         }
 
         public async Task<CreateUserResponse> CreateUserAsync(CreateUserCommand newUser)
@@ -99,5 +99,16 @@ namespace SSO_IdentityProvider.Application.Services
         {
             await _userRepository.DeleteOuAsync(command);
         }
+
+        public async Task<DirectoryUser> GetUserInfoAsync(string username)
+        {
+            var connection = _ldapAuthenticator.BindAsServiceAccount();
+            if (connection == null) throw new UnauthorizedAccessException();
+
+            var user = await _userRepository.GetMyProfileAsync(connection, username) ?? throw new UnauthorizedAccessException("User not found");
+
+            return user;
+        }
+
     }
 }

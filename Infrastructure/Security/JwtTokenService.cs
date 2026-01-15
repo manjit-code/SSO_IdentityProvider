@@ -1,10 +1,10 @@
-﻿using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Domain.Entities;
+﻿using SSO_IdentityProvider.Domain.Entities;
 using System.Security.Claims;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using SSO_IdentityProvider.Infrastructure.Configuration;
 using Microsoft.Extensions.Options;
+using SSO_IdentityProvider.Domain.Interfaces;
 
 namespace SSO_IdentityProvider.Infrastructure.Security
 {
@@ -12,9 +12,9 @@ namespace SSO_IdentityProvider.Infrastructure.Security
     {
         private readonly JwtSettings _jwtSettings;
 
-        public JwtTokenService(IOptions<JwtSettings> option) 
+        public JwtTokenService(IOptions<JwtSettings> option)
         {
-            _jwtSettings = option.Value;  
+            _jwtSettings = option.Value;
         }
         public string GenerateAccessToken(User user, IEnumerable<string> roles)
         {

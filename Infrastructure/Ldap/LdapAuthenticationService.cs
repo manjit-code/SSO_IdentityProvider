@@ -116,7 +116,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 _ldapSettings.Host,
                 _ldapSettings.PortS,
                 _ldapSettings.UseSslS,
-                false               
+                false
             );
 
             var connection = new LdapConnection(identifier)
@@ -144,13 +144,13 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 false
             );
 
-        var connection = new LdapConnection(identifier)
-        {
-            AuthType = AuthType.Negotiate,
-            Credential = new NetworkCredential(_ldapInfraSettings.Username, _ldapInfraSettings.Password)
-        };
+            var connection = new LdapConnection(identifier)
+            {
+                AuthType = AuthType.Negotiate,
+                Credential = new NetworkCredential(_ldapInfraSettings.Username, _ldapInfraSettings.Password)
+            };
 
-        connection.SessionOptions.ProtocolVersion = 3;
+            connection.SessionOptions.ProtocolVersion = 3;
             connection.SessionOptions.SecureSocketLayer = true;
 
             // Add this if your VM certificate isn't installed on your host machine

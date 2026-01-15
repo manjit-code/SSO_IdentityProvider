@@ -1,10 +1,14 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SSO_IdentityProvider.Application.Services;
 using SSO_IdentityProvider.Domain.Interfaces;
+using SSO_IdentityProvider.Domain.Interfaces.OAuth;
 using SSO_IdentityProvider.Infrastructure.Configuration;
 using SSO_IdentityProvider.Infrastructure.Ldap;
+using SSO_IdentityProvider.Infrastructure.OAuth;
 using SSO_IdentityProvider.Infrastructure.Security;
+using StackExchange.Redis;
 using System.Security.Claims;
 using System.Text;
 
@@ -47,6 +51,7 @@ builder.Services.AddSwaggerGen(options =>
             Array.Empty<string>()
         }
     });
+
 });
 
 // Configuration Binding
@@ -55,13 +60,18 @@ builder.Services.Configure<LdapSettings>( builder.Configuration.GetSection("Ldap
 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
 
 builder.Services.Configure<LdapInfraSettings>(builder.Configuration.GetSection("LdapInfraSettings"));
-
 // Dependency Injection
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 builder.Services.AddScoped<ILdapAuthenticator, LdapAuthenticationService>();
 builder.Services.AddScoped<IUserRepository, LdapUserRepository>();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
 builder.Services.AddScoped<DirectoryService>();
+
+builder.Services.AddScoped<IClientStore, InMemoryClientStore>();
+builder.Services.AddSingleton<IAuthorizationCodeStore, InMemoryAuthorizationCodeStore>();
+builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
+
+builder.Services.AddScoped<OAuthService>();
 
 // JWT Authentication
 builder.Services

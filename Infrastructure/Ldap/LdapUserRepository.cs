@@ -104,7 +104,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        public async Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection,UserSearchCriteria reqBody)
+        public async Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection, UserSearchCriteria reqBody)
         {
             return await Task.Run(() =>
             {
@@ -212,7 +212,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        public async Task UpdateUserProfileAsync(string userDn,UpdateMyProfile profile)
+        public async Task UpdateUserProfileAsync(string userDn, UpdateMyProfile profile)
         {
             await Task.Run(() =>
             {
@@ -231,7 +231,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     modifications.Add(mod);
                 }
 
-                
+
                 ReplaceIfProvided("displayName", profile.DisplayName);
                 ReplaceIfProvided("telephoneNumber", profile.TelephoneNumber);
                 ReplaceIfProvided("streetAddress", profile.StreetAddress);
@@ -247,7 +247,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
                 if (!string.IsNullOrWhiteSpace(profile.NewPassword))
                 {
-                    
+
                     ChangePassword(connection, userDn, profile.NewPassword);
                 }
             });
@@ -278,7 +278,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
-        
+
         public async Task<CreateUserResponse> CreateUserAsync(CreateUserCommand newUser)
         {
             var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
@@ -286,20 +286,21 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             var departmentOuDn = GetDepartmentOuDnAsync(connection, newUser.Department);
 
             var sAMAccountName = GenerateSamAccountName(newUser.FullName);
-            if(UserExistsBySamAsync(connection, sAMAccountName))
+            if (UserExistsBySamAsync(connection, sAMAccountName))
             {
                 throw new InvalidOperationException("User already exists.");
             }
 
             string? managerDn = null;
-            if(!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
+            if (!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
             {
                 managerDn = FindUserDn(connection, newUser.ManagerEmail);
                 if (managerDn == null)
                 {
                     throw new InvalidOperationException("Manager user does not exist.");
                 }
-            };
+            }
+            ;
 
             if (!string.IsNullOrWhiteSpace(newUser.Country) && newUser.Country.Length != 2)
             {
@@ -347,7 +348,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     new DirectoryAttribute("manager", managerDn)
                 );
             }
-            if( !string.IsNullOrWhiteSpace(newUser.StreetAddress))
+            if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
             {
                 addRequest.Attributes.Add(
                     new DirectoryAttribute("streetAddress", newUser.StreetAddress)
@@ -527,7 +528,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 // 2️. Handle department change: OU move
                 if (!string.IsNullOrWhiteSpace(command.Department))
                 {
-                    var targetOuDn = GetDepartmentOuDnAsync(connection,command.Department);
+                    var targetOuDn = GetDepartmentOuDnAsync(connection, command.Department);
                     MoveUserToOu(connection, userDn, targetOuDn);
 
                     // After move, DN changes: recompute
@@ -600,7 +601,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             return userDn.Substring(index + 1);
         }
-        private void MoveUserToOu(LdapConnection connection,string userDn,string targetOuDn)
+        private void MoveUserToOu(LdapConnection connection, string userDn, string targetOuDn)
         {
             var currentParentDn = GetParentOuDn(userDn);
 
@@ -609,7 +610,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             var rdn = userDn.Split(',')[0];
 
-            var request = new ModifyDNRequest(userDn,targetOuDn,rdn)
+            var request = new ModifyDNRequest(userDn, targetOuDn, rdn)
             {
                 DeleteOldRdn = true
             };
