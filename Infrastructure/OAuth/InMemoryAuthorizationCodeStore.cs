@@ -19,9 +19,6 @@ namespace SSO_IdentityProvider.Infrastructure.OAuth
 
         public AuthorizationCode? Take(string code)
         {
-            //var authorizationCode = _authorizationCodes.GetValueOrDefault(code);
-            //if(authorizationCode == null) return null;
-
             if (!_authorizationCodes.TryGetValue(code, out var authorizationCode))
             {
                 return null;

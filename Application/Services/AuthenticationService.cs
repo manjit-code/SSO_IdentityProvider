@@ -30,7 +30,8 @@ namespace SSO_IdentityProvider.Application.Services
             var roles = await _userRepository.GetUserGroupsAsync(connection, username);
             //Console.WriteLine($"Roles: {roles}");
 
-            return _tokenService.GenerateAccessToken(user, roles);
+            var scopes = new List<string> { "openid"}; // default scopes
+            return _tokenService.GenerateAccessToken(user, roles,scopes);
         }
     }
 }

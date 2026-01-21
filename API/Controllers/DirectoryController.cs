@@ -63,7 +63,7 @@ namespace SSO_IdentityProvider.API.Controllers
         [Authorize]
         public async Task<IActionResult> UpdateMyProfile([FromBody] UpdateMyProfileRequest request)
         {
-            var username = User.Identity?.Name; // from the token sent in the Header
+            var username = User.Identity?.Name; // extracts unique ID from the access token sent in the Header
             if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
 
             var domainModel = new UpdateMyProfile

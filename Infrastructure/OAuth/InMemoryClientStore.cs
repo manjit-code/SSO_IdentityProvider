@@ -16,11 +16,25 @@ namespace SSO_IdentityProvider.Infrastructure.OAuth
                     ClientSecret = "sample-secret",
                     RedirectUris = new[] {"http://localhost:5173"},
                     AllowedScopes = new[] {"openid", "profile"}
+                },
+                new OAuthClient
+                {
+                    ClientId = "react-app-a",
+                    RedirectUris = new[] { "http://localhost:5173/callback" },
+                    AllowedScopes = new[] { "openid", "profile", "email" }
+                },
+                new OAuthClient
+                {
+                    ClientId = "react-app-b",
+                    RedirectUris = new[] { "http://localhost:5174/callback" },
+                    AllowedScopes = new[] { "openid", "profile", "email" }
                 }
             ];
         public OAuthClient? FindClientById(string clientId)
         {
             return _clients.FirstOrDefault(c => c.ClientId == clientId);
         }
+
+
     }
 }

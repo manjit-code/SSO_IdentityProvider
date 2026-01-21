@@ -16,5 +16,7 @@ namespace SSO_IdentityProvider.Domain.Entities.OAuth
         public bool IsExpired => DateTime.UtcNow > ExpiresAt;
 
         public bool IsRevoked { get; set; }
+
+        public IReadOnlyCollection<string> Scopes { get; set; } = Array.Empty<string>();
     }
 }

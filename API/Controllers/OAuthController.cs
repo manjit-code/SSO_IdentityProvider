@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using SSO_IdentityProvider.API.DTOs;
 using SSO_IdentityProvider.Application.Services;
 using SSO_IdentityProvider.Domain.Entities.OAuth;
+using System.IdentityModel.Tokens.Jwt;
 
 namespace SSO_IdentityProvider.API.Controllers
 {
@@ -18,15 +19,42 @@ namespace SSO_IdentityProvider.API.Controllers
             _oauthService = oauthService;
         }
 
-        [HttpPost("authorize")]
-        public IActionResult Authorize([FromQuery] string client_id, [FromQuery] string redirect_uri, [FromQuery] string username, [FromQuery] string code_challenge, [FromQuery] string code_challenge_method = "S256")
-        {
-            if (string.IsNullOrWhiteSpace(username)) throw new UnauthorizedAccessException("Authenticated username required");
+        [HttpGet("authorize")]
+        public IActionResult Authorize([FromQuery] string client_id, [FromQuery] string redirect_uri, [FromQuery] string code_challenge, [FromQuery] string code_challenge_method = "S256", string scope = "openid",string? nonce = null) { 
+        
+            // If user NOT logged in → redirect to login page
+            if (!HttpContext.Session.TryGetValue("username", out _))
+            {
+                var returnUrl = Url.Action(
+                                action: "Authorize",
+                                controller: "OAuth",
+                                values: new
+                                {
+                                    client_id,
+                                    redirect_uri,
+                                    code_challenge,
+                                    code_challenge_method,
+                                    scope,
+                                    nonce
+                                });
+                if (string.IsNullOrWhiteSpace(returnUrl))
+                    throw new Exception("Failed to generate returnUrl");
 
+                
+                return Redirect(
+                    Url.Action(
+                        action: "Login",
+                        controller: "Login",
+                        values: new { returnUrl }
+                    )!
+                );
+            }
+            ;
+            var username = HttpContext.Session.GetString("username")!;
             // user already authenticated by client
-            var code = _oauthService.GenerateAuthorizationCode(client_id, redirect_uri, username, code_challenge, code_challenge_method);
+            var code = _oauthService.GenerateAuthorizationCode(client_id, redirect_uri, username, code_challenge, code_challenge_method, scope, nonce);
 
-            return Ok(new { code });
+            return Redirect($"{redirect_uri}?code={code}");
         }
 
         [HttpPost("token")]
@@ -53,6 +81,7 @@ namespace SSO_IdentityProvider.API.Controllers
                 access_token = result.accessToken,
                 refresh_token = result.refreshToken,
                 token_type = "Bearer",
+                id_token= result.idToken,
                 expires_in = 3600
             });
         }
@@ -112,21 +141,52 @@ namespace SSO_IdentityProvider.API.Controllers
             var username = User.Identity?.Name;
             if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
 
+            var scopeClaim = User.FindFirst("scope")?.Value ?? "";
+            var scopes = scopeClaim.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
             var user = await directoryService.GetUserInfoAsync(username);
 
+            // OIDC Scopes: openid profile email groups
             var response = new UserInfoResponse
             {
                 Sub = username,
-                PreferredUsername = username,
-                Name = user.DisplayName,
-                Email = user.Email,
-                PhoneNumber = user.Phone,
-                Department = user.Department,
-                Title = user.Title,
-                Groups = user.Groups
+                PreferredUsername = scopes.Contains("profile") ? username : "",
+                Name = scopes.Contains("profile") ? user.DisplayName : null,
+                Email = scopes.Contains("email") ? user.Email : null,
+                PhoneNumber = scopes.Contains("profile") ? user.Phone : null,
+                Department = scopes.Contains("profile") ? user.Department : null,
+                Title = scopes.Contains("profile") ? user.Title : null,
+                Groups = scopes.Contains("groups") ? user.Groups : Array.Empty<string>()
             };
 
             return Ok(response);
+        }
+
+
+        [HttpPost("introspect")]
+        [Consumes("application/x-www-form-urlencoded")]
+        public IActionResult Introspect([FromForm] string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return Ok(new { active = false });
+
+            var result = _oauthService.IntrospectToken(token);
+
+            if (!result.Active || result.Token == null)
+                return Ok(new { active = false });
+
+            var jwt = result.Token;
+
+            return Ok(new
+            {
+                active = true,
+                sub = jwt.Subject,
+                client_id = jwt.Audiences.FirstOrDefault(),
+                scope = jwt.Claims.FirstOrDefault(c => c.Type == "scope")?.Value,
+                exp = new DateTimeOffset(jwt.ValidTo).ToUnixTimeSeconds(),
+                iat = jwt.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Iat)?.Value,
+                iss = jwt.Issuer
+            });
         }
 
     }

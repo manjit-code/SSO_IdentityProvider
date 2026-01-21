@@ -19,5 +19,9 @@ namespace SSO_IdentityProvider.Domain.Entities.OAuth
 
         public DateTime ExpiresAt { get; set; }
         public bool IsExpired => DateTime.UtcNow > ExpiresAt;
+
+        // OIDC
+        public string Scope { get; set; } = "openid";
+        public string? Nonce { get; set; }
     }
 }

@@ -41,5 +41,13 @@ namespace SSO_IdentityProvider.Infrastructure.OAuth
                 token.IsRevoked = true;
             }
         }
+
+        public bool IsUserGloballyLoggedOut(string username)
+        {
+            return _store.Values
+                .Where(t => t.Username == username)
+                .All(t => t.IsRevoked);
+        }
+
     }
 }
