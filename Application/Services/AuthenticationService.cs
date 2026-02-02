@@ -1,4 +1,5 @@
 ﻿using SSO_IdentityProvider.Domain.Interfaces;
+using System.DirectoryServices.Protocols;
 
 namespace SSO_IdentityProvider.Application.Services
 {
@@ -22,9 +23,14 @@ namespace SSO_IdentityProvider.Application.Services
             {
                 throw new UnauthorizedAccessException("Invalid username or password.");
             }
-            //Console.WriteLine($"Connection : {connection}");
 
-            var user = await _userRepository.GetByUsernameAsync(connection, username) ?? throw new UnauthorizedAccessException();
+            // check if account is disabled
+            if (await IsAccountDisabled(username, connection))
+            {
+                throw new UnauthorizedAccessException("Account is disabled.");
+            }
+
+            var user = await _userRepository.GetByUsernameAsync(connection, username) ?? throw new UnauthorizedAccessException("User not found.");
             //Console.WriteLine($"User: {user}");
 
             var roles = await _userRepository.GetUserGroupsAsync(connection, username);
@@ -32,6 +38,21 @@ namespace SSO_IdentityProvider.Application.Services
 
             var scopes = new List<string> { "openid"}; // default scopes
             return _tokenService.GenerateAccessToken(user, roles,scopes);
+        }
+
+        private async Task<bool> IsAccountDisabled(string username, LdapConnection connection)
+        {
+            try
+            {
+                var profile = await _userRepository.GetMyProfileAsync(connection, username);
+                if (profile == null) return true;
+
+                return !profile.IsEnabled.HasValue || !profile.IsEnabled.Value;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

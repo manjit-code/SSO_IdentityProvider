@@ -14,7 +14,9 @@ namespace SSO_IdentityProvider.Domain.Entities
         public string? Email { get; set; }
         public string? Phone { get; set; }
         public string? Department { get; set; }
+        public string? Manager { get; set; }
         public string? Title { get; set; }
         public IReadOnlyCollection<string> Groups { get; set; } = Array.Empty<string>();
+        public bool? IsEnabled { get; set; } = true;
     }
 }

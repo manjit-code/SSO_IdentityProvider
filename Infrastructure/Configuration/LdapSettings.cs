@@ -10,14 +10,17 @@ namespace SSO_IdentityProvider.Infrastructure.Configuration
     {
         // host, port, useSSL, Base DN, Domain etc.
         public string Host { get; set; } = string.Empty;
-        public int Port { get; set; }
-        public bool UseSsl { get; set; }
+        public int Port { get; set; } = 636;
+        public bool UseSsl { get; set; } = true;
         public string BaseDn { get; set; } = string.Empty;
         public string Domain { get; set; } = string.Empty;
-
-        public int PortS { get; set; }
-        public bool UseSslS { get; set; }
         public string username { get; set; } = string.Empty;
         public string password { get; set; } = string.Empty;
+
+
+        // Add account status attribute configuration
+        public string AccountStatusAttribute { get; set; } = "description";
+        public string EnabledStatusValue { get; set; } = "Account Status: Active";
+        public string DisabledStatusValue { get; set; } = "Account Status: Disabled";
     }
 }

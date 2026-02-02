@@ -16,44 +16,41 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             _ldapInfraSettings = opt.Value;
         }
 
-        public LdapConnection BindAsServiceAccount()
+        // Helper method to bind to OpenLDAP
+        private LdapConnection BindToOpenLdap(string host, int port, bool useSsl, string bindDn, string password)
         {
-            //Console.WriteLine($"{_ldapSettings.Host} : {_ldapSettings.Port} : {_ldapSettings.username} : {_ldapSettings.password} : {_ldapSettings.Domain}");
-            var identifier = new LdapDirectoryIdentifier(
-                    _ldapSettings.Host,
-                    _ldapSettings.Port
-                );
-
-            var username = _ldapSettings.username;
-            var password = _ldapSettings.password;
-
-            // important to only use the username
-            username = username.Contains("@")
-            ? username.Split('@')[0]
-            : username;
-
-
-            var credentials = new System.Net.NetworkCredential(
-                username,
-                password,
-                _ldapSettings.Domain
-            );
+            var identifier = new LdapDirectoryIdentifier(host, port, useSsl, false);
             var connection = new LdapConnection(identifier)
             {
-                AuthType = AuthType.Negotiate,
-                Credential = credentials
+                AuthType = AuthType.Basic,
+                Credential = new NetworkCredential(bindDn, password)
             };
-
-            if (_ldapSettings.UseSsl)
+            connection.SessionOptions.ProtocolVersion = 3;
+            if (useSsl)
             {
                 connection.SessionOptions.SecureSocketLayer = true;
+                connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
             }
-
-            connection.SessionOptions.ProtocolVersion = 3;
-
-            connection.Bind();
-
-            return connection;
+            try
+            {
+                connection.Bind();
+                return connection;
+            }
+            catch (LdapException ex)
+            {
+                Console.WriteLine($"LDAP Bind failed for {bindDn}: {ex.Message}");
+                throw;
+            }
+        }
+        public LdapConnection BindAsServiceAccount()
+        {
+            return BindToOpenLdap(
+                _ldapSettings.Host,
+                _ldapSettings.Port,
+                _ldapSettings.UseSsl,
+                _ldapSettings.username,
+                _ldapSettings.password
+            );
         }
 
 
@@ -64,41 +61,59 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 try
                 {
-                    var identifier = new LdapDirectoryIdentifier(
-                        _ldapSettings.Host,
-                        _ldapSettings.Port
-                    );
-
-                    //important to only use the username
-                    username = username.Contains("@")
-                    ? username.Split('@')[0]
-                    : username;
-
-                    var credentials = new System.Net.NetworkCredential(
-                        username,
-                        password,
-                        _ldapSettings.Domain
-                    );
-                    var connection = new LdapConnection(identifier)
+                    // First, bind as service account to search for user
+                    using var searchConnection = BindAsServiceAccount();
+                    var searchFilter = $"(uid={username})";
+                    if (username.EndsWith("@corp.local", StringComparison.OrdinalIgnoreCase))
                     {
-                        AuthType = AuthType.Negotiate,
-                        Credential = credentials
-                    };
-
-                    if (_ldapSettings.UseSsl)
-                    {
-                        connection.SessionOptions.SecureSocketLayer = true;
+                        searchFilter = $"(mail={username})";
                     }
 
-                    // tells to use LDAPv3 protocol TO connect to the Domain Controller(VM Server)
-                    connection.SessionOptions.ProtocolVersion = 3;
+                    var searchRequest = new SearchRequest(
+                        _ldapSettings.BaseDn,
+                        searchFilter,
+                        SearchScope.Subtree,
+                        "dn"
+                    );
+                    var response = (SearchResponse)searchConnection.SendRequest(searchRequest);
+                    var userEntry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
 
-                    connection.Bind();
+                    if (userEntry == null)
+                    {
+                        Console.WriteLine($"User not found: {username}");
+                        return null;
+                    }
+
+                    var userDn = userEntry.DistinguishedName;
+
+                    //----- Bind with user credentials
+                    var connection = BindToOpenLdap(
+                        _ldapSettings.Host,
+                        _ldapSettings.Port,
+                        _ldapSettings.UseSsl,
+                        userDn,
+                        password
+                    );
+
                     return connection;
                 }
                 catch (LdapException ldapEx) when (ldapEx.ErrorCode == 49)
                 {
                     Console.WriteLine($"LDAP Bind Error: {ldapEx.ErrorCode} - {ldapEx.Message}");
+
+                    // Check for ppolicy specific errors
+                    if (ldapEx.Message.Contains("Constraint violation", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new UnauthorizedAccessException("Password does not meet policy requirements.");
+                    }
+                    else if (ldapEx.Message.Contains("password expired", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new UnauthorizedAccessException("Password expired. Please reset your password.");
+                    }
+                    else if (ldapEx.Message.Contains("account locked", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new UnauthorizedAccessException("Account locked due to too many failed attempts. Try again in 5 minutes.");
+                    }
 
                     return null;
                 }
@@ -112,52 +127,18 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
         public LdapConnection BindAsServiceAccountForWrite()
         {
-            var identifier = new LdapDirectoryIdentifier(
-                _ldapSettings.Host,
-                _ldapSettings.PortS,
-                _ldapSettings.UseSslS,
-                false
-            );
-
-            var connection = new LdapConnection(identifier)
-            {
-                AuthType = AuthType.Negotiate,
-                Credential = new NetworkCredential(_ldapSettings.username, _ldapSettings.password)
-            };
-
-            connection.SessionOptions.ProtocolVersion = 3;
-            connection.SessionOptions.SecureSocketLayer = true;
-
-            // Add this if your VM certificate isn't installed on your host machine
-            connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
-
-            connection.Bind();
-            return connection;
+            return BindAsServiceAccount();
         }
 
         public LdapConnection BindAsInfraServiceAccountForWrite()
         {
-            var identifier = new LdapDirectoryIdentifier(
+            return BindToOpenLdap(
                 _ldapInfraSettings.Host,
                 _ldapInfraSettings.Port,
                 _ldapInfraSettings.UseSsl,
-                false
+                _ldapInfraSettings.Username,
+                _ldapInfraSettings.Password
             );
-
-            var connection = new LdapConnection(identifier)
-            {
-                AuthType = AuthType.Negotiate,
-                Credential = new NetworkCredential(_ldapInfraSettings.Username, _ldapInfraSettings.Password)
-            };
-
-            connection.SessionOptions.ProtocolVersion = 3;
-            connection.SessionOptions.SecureSocketLayer = true;
-
-            // Add this if your VM certificate isn't installed on your host machine
-            connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
-
-            connection.Bind();
-            return connection;
         }
     }
 }

@@ -47,10 +47,10 @@ namespace SSO_IdentityProvider.API.Controllers
             var criteria = new UserSearchCriteria
             {
                 BaseDn = _ldapSettings.BaseDn,
-                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> { { "objectClass", "user" } },
+                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> { { "objectClass", "inetOrgPerson" } },
                 Attributes = request.IncludeAttributes?.Any() == true
                  ? request.IncludeAttributes
-                 : new List<string> { "cn", "sAMAccountName", "mobile", "mail", "distinguishedName", "memberOf" },
+                 : new List<string> { "cn", "uid", "mobile", "mail", "distinguishedName", "memberOf", "description" },
                 Scope = SearchScope.Subtree,
                 MaxResults = Math.Clamp(request.MaxResults, 1, 100)
             };
@@ -140,6 +140,22 @@ namespace SSO_IdentityProvider.API.Controllers
         [Authorize]
         public async Task<IActionResult> CreateOu([FromBody] CreateOuCommand request)
         {
+            if (string.IsNullOrWhiteSpace(request.ParentOuDn))
+            {
+                return BadRequest("Parent OU DN is required");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.NewOuName))
+            {
+                return BadRequest("New OU name is required");
+            }
+
+            // Validate OU name doesn't contain special characters
+            if (request.NewOuName.Any(c => "\\,+\"<>;=".Contains(c)))
+            {
+                return BadRequest("OU name contains invalid characters");
+            }
+
             await _directoryService.CreateOuAsync(new CreateOuCommand
             {
                 ParentOuDn = request.ParentOuDn,
@@ -151,15 +167,51 @@ namespace SSO_IdentityProvider.API.Controllers
 
         [HttpDelete("remove-ou")]
         [Authorize]
-        public async Task<IActionResult> DeleteOu([FromBody] DeleteOuCommand request)
+        public async Task<IActionResult> DeleteOu([FromQuery] string ouDn, [FromQuery] bool cascadeDelete = false)
         {
-            await _directoryService.DeleteOuAsync(new DeleteOuCommand
+            if (string.IsNullOrWhiteSpace(ouDn))
             {
-                OuDn = request.OuDn,
-                CascadeDelete = request.CascadeDelete
-            });
+                return BadRequest("OU DN is required");
+            }
 
-            return NoContent();
+            // Prevent deletion of critical OUs
+            var criticalOus = new[]
+            {
+                "ou=Employees,dc=corp,dc=local",
+                "dc=corp,dc=local"
+            };
+
+            var normalizedOuDn = ouDn.Trim().ToLower();
+            foreach (var criticalOu in criticalOus)
+            {
+                if (normalizedOuDn == criticalOu.ToLower())
+                {
+                    return BadRequest(new
+                    {
+                        error = "Cannot delete critical organizational unit",
+                        criticalOu = criticalOu
+                    });
+                }
+            }
+
+            try
+            {
+                await _directoryService.DeleteOuAsync(new DeleteOuCommand
+                {
+                    OuDn = ouDn,
+                    CascadeDelete = cascadeDelete
+                });
+
+                return NoContent();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { error = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = $"Internal server error: {ex.Message}" });
+            }
         }
 
     }

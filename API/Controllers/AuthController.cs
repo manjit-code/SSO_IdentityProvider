@@ -23,7 +23,7 @@ namespace SSO_IdentityProvider.API.Controllers
             _ldapSettings = options.Value;
         }
 
-
+        
         [HttpGet("ldap-health")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         public IActionResult LdapHealth()
@@ -38,7 +38,7 @@ namespace SSO_IdentityProvider.API.Controllers
                 var credential = new NetworkCredential(_ldapSettings.username, _ldapSettings.password);
                 using var connection = new LdapConnection(identifier)
                 {
-                    AuthType = AuthType.Negotiate,
+                    AuthType = AuthType.Basic,
                     Credential = credential
                 };
 
