@@ -2,6 +2,7 @@
 using SSO_IdentityProvider.Domain.Entities;
 using SSO_IdentityProvider.Domain.Interfaces;
 using SSO_IdentityProvider.Infrastructure.Configuration;
+using SSO_IdentityProvider.Infrastructure.Mapper;
 using System;
 using System.Collections.Generic;
 using System.DirectoryServices.Protocols;
@@ -19,26 +20,30 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
     {
         private readonly LdapSettings _ldapSettings;
         private readonly ILdapAuthenticator _ldapAuthenticator;
-        public LdapUserRepository(IOptions<LdapSettings> option, ILdapAuthenticator ldapAuthenticator)
+        private readonly AttributeMapper _attributeMapper;
+        public LdapUserRepository(IOptions<LdapSettings> option, ILdapAuthenticator ldapAuthenticator, AttributeMapper attributeMapper)
         {
             _ldapSettings = option.Value;
             _ldapAuthenticator = ldapAuthenticator;
+            _attributeMapper = attributeMapper;
         }
 
         public async Task<User?> GetByUsernameAsync(LdapConnection connection, string username)
         {
             return await Task.Run(() =>
             {
+                string usernameAttribute = _attributeMapper.GetUsernameSearchAttribute();
+                string emailAttribute = _attributeMapper.GetEmailSearchAttribute();
 
-                var searchFilter = username.EndsWith("@corp.local", StringComparison.OrdinalIgnoreCase)
-                                    ? $"(mail={username})"
-                                    : $"(uid={username})";
+                var searchFilter = username.Contains("@")
+                            ? $"({emailAttribute}={Escape(username)})"
+                            : $"({usernameAttribute}={Escape(username)})";
 
                 var request = new SearchRequest(
                     _ldapSettings.BaseDn,
                     searchFilter,
                     SearchScope.Subtree,
-                    "cn", "mail", "uid", "dn"
+                    usernameAttribute, emailAttribute, "dn"
                 );
 
                 var response = (SearchResponse)connection.SendRequest(request);
@@ -48,9 +53,25 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     return null;
                 }
 
+                //string userName = entry.Attributes[usernameAttribute]?[0]?.ToString() ?? username;
+
+                string extractedUsername;
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    extractedUsername = entry.Attributes["sAMAccountName"]?[0]?.ToString()
+                        ?? entry.Attributes["userPrincipalName"]?[0]?.ToString()?.Split('@')[0]
+                        ?? username;
+                }
+                else
+                {
+                    extractedUsername = entry.Attributes[usernameAttribute]?[0]?.ToString()
+                        ?? entry.Attributes[emailAttribute]?[0]?.ToString()?.Split('@')[0]
+                        ?? username;
+                }
+
                 var newUser = new User
                 {
-                    UserName = entry.Attributes["uid"]?[0]?.ToString() ?? username,
+                    UserName = extractedUsername,
                     DistinguishedName = entry.DistinguishedName
                 };
 
@@ -62,23 +83,43 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             return await Task.Run(() =>
             {
-                var searchFilter = username.EndsWith("@corp.local", StringComparison.OrdinalIgnoreCase)
-                                    ? $"(mail={username})"
-                                    : $"(uid={username})";
+                string usernameAttribute = _attributeMapper.MapAttribute("Username");
+                string emailAttribute = _attributeMapper.MapAttribute("Email");
+
+                var searchFilter = username.Contains("@")
+                        ? $"({emailAttribute}={Escape(username)})"
+                        : $"({usernameAttribute}={Escape(username)})";
+
+                var requestAttributes = new List<string>
+                {
+                    "distinguishedName",
+                    _attributeMapper.MapAttribute("DisplayName"),
+                    _attributeMapper.MapAttribute("Email"),
+                    _attributeMapper.MapAttribute("Phone"),
+                    _attributeMapper.MapAttribute("Title"),
+                    _attributeMapper.MapAttribute("Manager"),
+                    _attributeMapper.MapAttribute("MemberOf")
+                };
+                // Add department attribute (handled differently for OpenLDAP vs AD)
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    requestAttributes.Add(_attributeMapper.MapAttribute("Department"));
+                    if (_attributeMapper.UseAdAccountControl)
+                    {
+                        requestAttributes.Add(_attributeMapper.MapAttribute("AccountStatus"));
+                    }
+                }
+                else
+                {
+                    // For OpenLDAP, department is in description
+                    requestAttributes.Add("description");
+                }
 
                 var request = new SearchRequest(
                     _ldapSettings.BaseDn,
                     searchFilter,
                     SearchScope.Subtree,
-                    "distinguishedName",
-                    "cn",
-                    "mail",
-                    "telephoneNumber",
-                    "description",
-                    "title",
-                    "memberOf",
-                    "manager",
-                     _ldapSettings.AccountStatusAttribute
+                    requestAttributes.ToArray()
                 );
 
                 var response = (SearchResponse)connection.SendRequest(request);
@@ -87,45 +128,97 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 if (entry == null) return null;
 
                 var groups = new List<string>();
-                if (entry.Attributes.Contains("memberOf"))
+                string memberOfAttribute = _attributeMapper.MapAttribute("MemberOf");
+                if (entry.Attributes.Contains(memberOfAttribute))
                 {
-                    groups = entry.Attributes["memberOf"]
+                    var groupDns = entry.Attributes[memberOfAttribute]
                         .GetValues(typeof(string))
-                        .Cast<string>()
-                        .Select(dn => dn.Split(',')[0].Replace("cn=", ""))
+                        .Cast<string>();
+
+                    groups = groupDns
+                        .Select(dn => _attributeMapper.ExtractGroupNameFromDn(dn))
+                        .Where(name => !string.IsNullOrEmpty(name))
                         .ToList();
                 }
 
-                var description = entry.Attributes["description"]?[0]?.ToString();
-                var descriptionAttributes = ParseDescriptionAttributes(description);
-
+                // Extract department based on LDAP type
                 string? department = null;
-                if (descriptionAttributes.TryGetValue("Department", out var deptValue))
+                if (_attributeMapper.IsActiveDirectory)
                 {
-                    department = deptValue;
+                    // AD: department is a separate attribute
+                    string deptAttribute = _attributeMapper.MapAttribute("Department");
+                    if (entry.Attributes.Contains(deptAttribute))
+                    {
+                        department = entry.Attributes[deptAttribute][0]?.ToString();
+                    }
+                }
+                else
+                {
+                    // OpenLDAP: department is in description
+                    var description = entry.Attributes["description"]?[0]?.ToString();
+                    var descriptionAttributes = ParseDescriptionAttributes(description);
+                    if (descriptionAttributes.TryGetValue("Department", out var deptValue))
+                    {
+                        department = deptValue;
+                    }
                 }
 
                 // Check account status: Multiple Possible Keys Checks
                 bool isEnabled = true;
-                if (descriptionAttributes.TryGetValue("Account Status", out var statusValue))
+                if (_attributeMapper.IsActiveDirectory && _attributeMapper.UseAdAccountControl)
                 {
-                    isEnabled = !statusValue.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
+                    // AD: Use userAccountControl attribute
+                    string statusAttribute = _attributeMapper.MapAttribute("AccountStatus");
+                    if (entry.Attributes.Contains(statusAttribute))
+                    {
+                        var statusValue = entry.Attributes[statusAttribute][0]?.ToString();
+                        if (int.TryParse(statusValue, out int userAccountControl))
+                        {
+                            isEnabled = (userAccountControl & 2) == 0; // Account disabled flag
+                        }
+                    }
                 }
-                else if (descriptionAttributes.TryGetValue("Status", out var altStatusValue))
+                else
                 {
-                    isEnabled = !altStatusValue.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
+                    // OpenLDAP: Parse from description
+                    var description = entry.Attributes["description"]?[0]?.ToString();
+                    var descriptionAttributes = ParseDescriptionAttributes(description);
+
+                    if (descriptionAttributes.TryGetValue("Account Status", out var statusValue))
+                    {
+                        isEnabled = !statusValue.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
+                    }
+                    else if (descriptionAttributes.TryGetValue("Status", out var altStatusValue))
+                    {
+                        isEnabled = !altStatusValue.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+
+                // Extract username 
+                string extractedUsername;
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    extractedUsername = entry.Attributes["sAMAccountName"]?[0]?.ToString()
+                        ?? entry.Attributes["userPrincipalName"]?[0]?.ToString()?.Split('@')[0]
+                        ?? username;
+                }
+                else
+                {
+                    extractedUsername = entry.Attributes["uid"]?[0]?.ToString()
+                        ?? entry.Attributes["mail"]?[0]?.ToString()?.Split('@')[0]
+                        ?? username;
                 }
 
                 return new DirectoryUser
                 {
-                    Username = username.Contains("@") ? username.Split('@')[0] : username,
+                    Username = extractedUsername,
                     DistinguishedName = entry.DistinguishedName,
-                    DisplayName = entry.Attributes["cn"]?[0]?.ToString(),
-                    Email = entry.Attributes["mail"]?[0]?.ToString(),
-                    Phone = entry.Attributes["telephoneNumber"]?[0]?.ToString(),
+                    DisplayName = entry.Attributes[_attributeMapper.MapAttribute("DisplayName")]?[0]?.ToString(),
+                    Email = entry.Attributes[_attributeMapper.MapAttribute("Email")]?[0]?.ToString(),
+                    Phone = entry.Attributes[_attributeMapper.MapAttribute("Phone")]?[0]?.ToString(),
                     Department =department,
-                    Title = entry.Attributes["title"]?[0]?.ToString(),
-                    Manager = entry.Attributes["manager"]?[0]?.ToString(),
+                    Title = entry.Attributes[_attributeMapper.MapAttribute("Title")]?[0]?.ToString(),
+                    Manager = entry.Attributes[_attributeMapper.MapAttribute("Manager")]?[0]?.ToString(),
                     Groups = groups,
                     IsEnabled = isEnabled
                 };
@@ -160,137 +253,421 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             return result;
         }
-        
+
         public async Task<IReadOnlyCollection<DirectorySearchResult>> SearchUsersAsync(LdapConnection connection, UserSearchCriteria reqBody)
         {
             return await Task.Run(() =>
             {
-                // Transform AD-specific filters to OpenLDAP
-                var transformedFilters = new Dictionary<string, string>();
+                // Use configured base DN or provided one
+                var searchBaseDn = string.IsNullOrWhiteSpace(reqBody.BaseDn)
+                    ? _ldapSettings.BaseDn
+                    : reqBody.BaseDn;
 
-                if (reqBody.Filters != null)
-                {
-                    foreach (var (attribute, rawValue) in reqBody.Filters)
-                    {
-                        var openLdapAttribute = attribute switch
-                        {
-                            "sAMAccountName" => "uid",
-                            "userPrincipalName" => "mail",
-                            "displayName" => "cn",
-                            _ => attribute
-                        };
-                        transformedFilters[openLdapAttribute] = rawValue;
-                    }
-                }
-
-                // 1️⃣ Build LDAP filter
                 var filterParts = new List<string>();
 
-                foreach (var (attribute, rawValue) in transformedFilters)
+                // Start with base object class filter
+                filterParts.Add(_attributeMapper.GetUserSearchFilter());
+
+                // Process filters if provided
+                if (reqBody.Filters != null && reqBody.Filters.Any())
                 {
-                    if (rawValue == "*")
+                    // Handle OU filter specially (changes search base)
+                    if (reqBody.Filters.TryGetValue("ou", out var ouValue) && !string.IsNullOrWhiteSpace(ouValue))
                     {
-                        filterParts.Add($"({attribute}=*)");
-                        continue;
-                    }
-
-                    var escaped = rawValue
-                        .Replace("\\", "\\5c")
-                        .Replace("*", "\\2a")
-                        .Replace("(", "\\28")
-                        .Replace(")", "\\29")
-                        .Replace("\0", "\\00");
-
-                    filterParts.Add($"({attribute}={escaped})");
-                }
-
-                var ldapFilter = filterParts.Count switch
-                {
-                    0 => "(objectClass=inetOrgPerson)",
-                    1 => filterParts[0],
-                    _ => $"(&{string.Join("", filterParts)})"
-                };
-
-
-                // Transform AD-specific attributes to OpenLDAP
-                var transformedAttributes = reqBody.Attributes
-                    .Select(attr => attr switch
-                    {
-                        "sAMAccountName" => "uid",
-                        "userPrincipalName" => "mail",
-                        "displayName" => "cn",
-                        _ => attr
-                    })
-                    .ToArray();
-
-                // 2️⃣ LDAP search request
-                var request = new SearchRequest(
-                    reqBody.BaseDn!,
-                    ldapFilter,
-                    reqBody.Scope,
-                    transformedAttributes
-                )
-                {
-                    SizeLimit = reqBody.MaxResults
-                };
-
-                var response = (SearchResponse)connection.SendRequest(request);
-                var results = new List<DirectorySearchResult>();
-
-                // 3️⃣ Map results
-                foreach (SearchResultEntry entry in response.Entries)
-                {
-                    var result = new DirectorySearchResult
-                    {
-                        DistinguishedName = entry.DistinguishedName,
-                        Username = entry.Attributes["uid"]?[0]?.ToString()
-                           ?? entry.Attributes["cn"]?[0]?.ToString()
-                           ?? "Unavailable"
+                        if (!ouValue.Contains("dc="))
+                        {
+                            // Simple OU name, try different formats
+                            var possibleOus = new[]
+                            {
+                        $"ou={Escape(ouValue)},{_ldapSettings.BaseDn}",
+                        $"ou={Escape(ouValue)},ou=Employees,{_ldapSettings.BaseDn}",
+                        $"ou={Escape(ouValue)},ou=Departments,{_ldapSettings.BaseDn}"
                     };
 
-                    foreach (var attr in reqBody.Attributes)
-                    {
+                            // Find which OU actually exists
+                            foreach (var possibleOu in possibleOus)
+                            {
+                                try
+                                {
+                                    var checkRequest = new SearchRequest(
+                                        possibleOu,
+                                        "(objectClass=*)",
+                                        SearchScope.Base,
+                                        "ou"
+                                    );
+                                    var checkResponse = (SearchResponse)connection.SendRequest(checkRequest);
+                                    if (checkResponse.Entries.Count > 0)
+                                    {
+                                        searchBaseDn = possibleOu;
+                                        Console.WriteLine($"Found OU at: {searchBaseDn}");
+                                        break;
+                                    }
+                                }
+                                catch
+                                {
+                                    // Try next possible location
+                                    continue;
+                                }
+                            }
 
-                        // Map attribute name for lookup
-                        var lookupAttr = attr switch
+                            // If no OU found, use the base DN with subtree search
+                            if (searchBaseDn == _ldapSettings.BaseDn)
+                            {
+                                Console.WriteLine($"OU '{ouValue}' not found, using base DN with filter");
+                                // Add OU filter to search within base DN
+                                filterParts.Add($"(ou={Escape(ouValue)})");
+                            }
+                        }
+                        else
                         {
-                            "sAMAccountName" => "uid",
-                            "userPrincipalName" => "mail",
-                            "displayName" => "cn",
-                            _ => attr
-                        };
+                            // Already a DN
+                            searchBaseDn = ouValue;
+                        }
 
-                        if (!entry.Attributes.Contains(lookupAttr)) continue;
-
-                        var value = entry.Attributes[lookupAttr]?[0]?.ToString();
-                        result.Attributes[attr] =
-                            string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+                        // Remove OU filter from regular filters
+                        var filtersWithoutOu = new Dictionary<string, string>(reqBody.Filters);
+                        filtersWithoutOu.Remove("ou");
+                        reqBody.Filters = filtersWithoutOu;
                     }
 
-                    results.Add(result);
+                    // Build remaining filters
+                    foreach (var (attribute, rawValue) in reqBody.Filters)
+                    {
+                        if (string.IsNullOrWhiteSpace(rawValue)) continue;
+
+                        var attrLower = attribute.ToLowerInvariant();
+                        // Handle department/status specially for OpenLDAP
+                        if (_attributeMapper.IsOpenLdap &&
+                            (attrLower == "department" || attrLower == "status" || attrLower == "accountstatus"))
+                        {
+                            // These use the description attribute for OpenLDAP
+                            var formattedVal = _attributeMapper.FormatSearchValue(attribute, rawValue);
+                            var escapedVal = Escape(formattedVal);
+                            filterParts.Add($"(description={escapedVal})");
+                            continue;
+                        }
+
+                        var ldapAttribute = _attributeMapper.MapAttribute(attribute);
+                        var formattedValue = _attributeMapper.FormatSearchValue(attribute, rawValue);
+                        var escapedValue = Escape(formattedValue);
+
+                        if (rawValue == "*")
+                        {
+                            filterParts.Add($"({ldapAttribute}=*)");
+                        }
+                        else if (rawValue.Contains("*"))
+                        {
+                            // Handle wildcards - escape the asterisk
+                            var wildcardEscaped = EscapeWildcard(rawValue);
+                            filterParts.Add($"({ldapAttribute}={wildcardEscaped})");
+                        }
+                        else
+                        {
+                            filterParts.Add($"({ldapAttribute}={escapedValue})");
+                        }
+                    }
                 }
 
-                return results;
+                // Build final LDAP filter
+                string ldapFilter;
+                if (filterParts.Count == 1)
+                {
+                    ldapFilter = filterParts[0];
+                }
+                else if (filterParts.Count > 1)
+                {
+                    ldapFilter = $"(&{string.Join("", filterParts)})";
+                }
+                else
+                {
+                    ldapFilter = _attributeMapper.GetUserSearchFilter();
+                }
+
+                Console.WriteLine($"LDAP Search - BaseDN: {searchBaseDn}, Filter: {ldapFilter}");
+
+                // Prepare attributes to retrieve
+                var requestedAttributes = new HashSet<string>
+                {
+                    "distinguishedName",
+                    _attributeMapper.GetUsernameSearchAttribute(),
+                    _attributeMapper.GetEmailSearchAttribute(),
+                    _attributeMapper.MapAttribute("DisplayName")
+                };
+
+                // Add requested attributes
+                if (reqBody.Attributes != null && reqBody.Attributes.Any())
+                {
+                    foreach (var attr in reqBody.Attributes)
+                    {
+                        var attrLower = attr.ToLowerInvariant();
+
+                        // For OpenLDAP, include description if department or status is requested
+                        if (_attributeMapper.IsOpenLdap &&
+                            (attrLower == "department" || attrLower == "status" || attrLower == "accountstatus"))
+                        {
+                            requestedAttributes.Add("description");
+                        }
+                        else if (attrLower == "department" && _attributeMapper.IsActiveDirectory)
+                        {
+                            requestedAttributes.Add(_attributeMapper.MapAttribute("Department"));
+                        }
+                        else if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsActiveDirectory)
+                        {
+                            requestedAttributes.Add(_attributeMapper.MapAttribute("AccountStatus"));
+                        }
+                        else
+                        {
+                            var ldapAttr = _attributeMapper.MapAttribute(attr);
+                            requestedAttributes.Add(ldapAttr);
+                        }
+                    }
+                }
+
+                // LDAP search request
+                var request = new SearchRequest(
+                    searchBaseDn,
+                    ldapFilter,
+                    SearchScope.Subtree,
+                    requestedAttributes.ToArray()
+                )
+                {
+                    SizeLimit = Math.Max(reqBody.MaxResults, 1)
+                };
+
+                try
+                {
+                    var response = (SearchResponse)connection.SendRequest(request);
+                    var results = new List<DirectorySearchResult>();
+
+                    foreach (SearchResultEntry entry in response.Entries)
+                    {
+                        var result = new DirectorySearchResult
+                        {
+                            DistinguishedName = entry.DistinguishedName
+                        };
+
+                        // Get username from appropriate attribute
+                        var usernameAttr = _attributeMapper.GetUsernameSearchAttribute();
+                        if (entry.Attributes.Contains(usernameAttr))
+                        {
+                            result.Username = entry.Attributes[usernameAttr][0]?.ToString() ?? "Unavailable";
+                        }
+                        else
+                        {
+                            // Fallback: extract from DN
+                            result.Username = ExtractUsernameFromDn(entry.DistinguishedName);
+                        }
+
+                        // Process requested attributes or default ones
+                        var attributesToProcess = reqBody.Attributes?.Any() == true
+                            ? reqBody.Attributes
+                            : new List<string> { "Username", "DisplayName", "Email" };
+
+                        foreach (var attr in attributesToProcess)
+                        {
+                            var attrLower = attr.ToLowerInvariant();
+
+                            // Special handling for department in OpenLDAP
+                            if (attrLower == "department" && _attributeMapper.IsOpenLdap)
+                            {
+                                if (entry.Attributes.Contains("description"))
+                                {
+                                    var description = entry.Attributes["description"][0]?.ToString();
+                                    var dept = ExtractValueFromDescription(description, "Department");
+                                    result.Attributes[attr] = dept ?? "Unavailable";
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Unavailable";
+                                }
+                                continue;
+                            }
+
+                            // Special handling for status in OpenLDAP
+                            if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsOpenLdap)
+                            {
+                                if (entry.Attributes.Contains("description"))
+                                {
+                                    var description = entry.Attributes["description"][0]?.ToString();
+                                    var status = ExtractValueFromDescription(description, "Account Status")
+                                              ?? ExtractValueFromDescription(description, "Status");
+                                    result.Attributes[attr] = status ?? "Unknown";
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Unknown";
+                                }
+                                continue;
+                            }
+
+                            // Special handling for department in AD
+                            if (attrLower == "department" && _attributeMapper.IsActiveDirectory)
+                            {
+                                var deptAttr = _attributeMapper.MapAttribute("Department");
+                                if (entry.Attributes.Contains(deptAttr))
+                                {
+                                    result.Attributes[attr] = entry.Attributes[deptAttr][0]?.ToString() ?? "Unavailable";
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Unavailable";
+                                }
+                                continue;
+                            }
+
+                            // Special handling for status in AD
+                            if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsActiveDirectory)
+                            {
+                                var statusAttr = _attributeMapper.MapAttribute("AccountStatus");
+                                if (entry.Attributes.Contains(statusAttr))
+                                {
+                                    var statusValue = entry.Attributes[statusAttr][0]?.ToString();
+                                    if (int.TryParse(statusValue, out int userAccountControl))
+                                    {
+                                        bool isEnabled = (userAccountControl & 2) == 0; // Account disabled flag
+                                        result.Attributes[attr] = isEnabled ? "Active" : "Disabled";
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Unknown";
+                                    }
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Unknown";
+                                }
+                                continue;
+                            }
+
+                            // Map generic attribute to LDAP attribute
+                            var ldapAttr = _attributeMapper.MapAttribute(attr);
+
+                            if (entry.Attributes.Contains(ldapAttr))
+                            {
+                                var value = entry.Attributes[ldapAttr][0]?.ToString();
+                                result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+                            }
+                            else
+                            {
+                                result.Attributes[attr] = "Unavailable";
+                            }
+                        }
+
+                        results.Add(result);
+                    }
+
+                    return results;
+                }
+                catch (DirectoryOperationException ex) when (ex.Message.Contains("The object does not exist"))
+                {
+                    Console.WriteLine($"OU not found: {searchBaseDn}. Trying alternative search...");
+
+                    // If OU not found, search from base DN with ou filter
+                    if (searchBaseDn != _ldapSettings.BaseDn)
+                    {
+                        var ouFilter = $"(ou={Escape(searchBaseDn.Split(',')[0].Replace("ou=", ""))})";
+                        var combinedFilter = $"(&{_attributeMapper.GetUserSearchFilter()}{ouFilter})";
+
+                        var fallbackRequest = new SearchRequest(
+                            _ldapSettings.BaseDn,
+                            combinedFilter,
+                            SearchScope.Subtree,
+                            requestedAttributes.ToArray()
+                        )
+                        {
+                            SizeLimit = Math.Max(reqBody.MaxResults, 1)
+                        };
+
+                        var fallbackResponse = (SearchResponse)connection.SendRequest(fallbackRequest);
+                        var results = new List<DirectorySearchResult>();
+
+                        foreach (SearchResultEntry entry in fallbackResponse.Entries)
+                        {
+                            var result = new DirectorySearchResult
+                            {
+                                DistinguishedName = entry.DistinguishedName,
+                                Username = ExtractUsernameFromDn(entry.DistinguishedName)
+                            };
+
+                            // Process attributes similarly...
+                            // (Add similar attribute processing logic here)
+
+                            results.Add(result);
+                        }
+
+                        return results;
+                    }
+
+                    throw;
+                }
             });
         }
 
+        // Helper method to extract username from DN if specific attributes are missing
+        private string ExtractUsernameFromDn(string dn)
+        {
+            if (string.IsNullOrEmpty(dn)) return "Unavailable";
 
+            var parts = dn.Split(',');
+            foreach (var part in parts)
+            {
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    if (part.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
+                        return part.Substring(3);
+                }
+                else
+                {
+                    if (part.StartsWith("uid=", StringComparison.OrdinalIgnoreCase))
+                        return part.Substring(4);
+                    if (part.StartsWith("cn=", StringComparison.OrdinalIgnoreCase))
+                        return part.Substring(3);
+                }
+            }
+
+            return dn;
+        }
+
+        // Helper method to extract value from description field
+        private string? ExtractValueFromDescription(string? description, string key)
+        {
+            if (string.IsNullOrWhiteSpace(description)) return null;
+
+            var parts = description.Split(';');
+            foreach (var part in parts)
+            {
+                var trimmed = part.Trim();
+                if (trimmed.StartsWith($"{key}:", StringComparison.OrdinalIgnoreCase))
+                {
+                    return trimmed.Substring(key.Length + 1).Trim();
+                }
+            }
+
+            return null;
+        }
+
+        // Helper method to escape wildcards properly
+        private string EscapeWildcard(string value)
+        {
+            // Simple wildcard handling - just escape the asterisk
+            return value.Replace("*", "\\2a");
+        }
         public async Task<IEnumerable<string>> GetUserGroupsAsync(LdapConnection connection, string username)
         {
             return await Task.Run(() => {
 
-                // Change from sAMAccountName to uid search
-                var searchFilter = $"(uid={username})";
-                if (username.Contains("@"))
-                {
-                    searchFilter = $"(mail={username})";
-                }
+                string usernameAttr = _attributeMapper.GetUsernameSearchAttribute();
+                string emailAttr = _attributeMapper.GetEmailSearchAttribute();
+
+                var searchFilter = username.Contains("@")
+                        ? $"({emailAttr}={Escape(username)})"
+                        : $"({usernameAttr}={Escape(username)})";
 
                 var request = new SearchRequest(
                     _ldapSettings.BaseDn,
                     searchFilter,
                     SearchScope.Subtree,
-                    "memberOf"
+                     _attributeMapper.MapAttribute("MemberOf")
                 );
 
                 var response = (SearchResponse)connection.SendRequest(request);
@@ -301,14 +678,16 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 }
 
                 // checks whether the user is 'member of any group' or not
-                if (!entry.Attributes.Contains("memberOf") || entry.Attributes["memberOf"] == null)
+                string memberOfAttr = _attributeMapper.MapAttribute("MemberOf");
+                if (!entry.Attributes.Contains(memberOfAttr) || entry.Attributes[memberOfAttr] == null)
                 {
                     return Enumerable.Empty<string>();
                 }
-                var groups = entry.Attributes["memberOf"]
+                var groups = entry.Attributes[memberOfAttr]
                     .GetValues(typeof(string))
                     .Cast<string>()
-                    .Select(dn => dn.Split(',')[0].Replace("cn=", "")) // Extract CN from DN
+                    .Select(dn => _attributeMapper.ExtractGroupNameFromDn(dn))
+                    .Where(name => !string.IsNullOrEmpty(name))
                     .ToList();
 
                 return groups;
@@ -334,31 +713,23 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     modifications.Add(mod);
                 }
 
-
-                // For OpenLDAP, use 'cn' instead of 'displayName'
-                // or add both for consistency
+                // Update display name (cn for OpenLDAP, displayName for AD)
                 if (!string.IsNullOrWhiteSpace(profile.DisplayName))
                 {
-                    // Option 1: Update cn (recommended for OpenLDAP)
-                    var cnMod = new DirectoryAttributeModification
+                    if (_attributeMapper.IsActiveDirectory)
                     {
-                        Name = "cn",
-                        Operation = DirectoryAttributeOperation.Replace
-                    };
-                    cnMod.Add(profile.DisplayName);
-                    modifications.Add(cnMod);
-
-                    // Option 2: Also update displayName if your schema supports it
-                    var displayNameMod = new DirectoryAttributeModification
+                        ReplaceIfProvided("displayName", profile.DisplayName);
+                        // Also update cn for consistency
+                        ReplaceIfProvided("cn", profile.DisplayName);
+                    }
+                    else
                     {
-                        Name = "displayName",
-                        Operation = DirectoryAttributeOperation.Replace
-                    };
-                    displayNameMod.Add(profile.DisplayName);
-                    modifications.Add(displayNameMod);
+                        ReplaceIfProvided("cn", profile.DisplayName);
+                    }
                 }
 
-                ReplaceIfProvided("telephoneNumber", profile.TelephoneNumber);
+                // Update other attributes using mapped names
+                ReplaceIfProvided(_attributeMapper.MapAttribute("Phone"), profile.TelephoneNumber);
                 ReplaceIfProvided("streetAddress", profile.StreetAddress);
                 ReplaceIfProvided("l", profile.City);
                 ReplaceIfProvided("st", profile.State);
@@ -382,21 +753,22 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        private static void ChangePassword(LdapConnection connection, string userDn, string newPassword)
+        private void ChangePassword(LdapConnection connection, string userDn, string newPassword)
         {
             try
             {
-                var hashedPassword = GenerateSSHAHash(newPassword);
-
-                var mod = new DirectoryAttributeModification
+                var passwordAttribute = _attributeMapper.MapAttribute("Password");
+                
+                if (_attributeMapper.IsActiveDirectory)
                 {
-                    Name = "userPassword",
-                    Operation = DirectoryAttributeOperation.Replace
-                };
-                mod.Add(hashedPassword);
-
-                var request = new ModifyRequest(userDn, mod);
-                connection.SendRequest(request);
+                    // Use unicodePwd with UTF-16LE encoding
+                    ChangePasswordAD(connection, userDn, newPassword);
+                }
+                else
+                {
+                    // Use userPassword with SSHA hash
+                    ChangePasswordOpenLDAP(connection, userDn, newPassword);
+                }
             }
             catch (DirectoryOperationException ex)
             {
@@ -414,26 +786,99 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
+        private static void ChangePasswordOpenLDAP(LdapConnection connection, string userDn, string newPassword)
+        {
+            var hashedPassword = GenerateSSHAHash(newPassword);
+
+            var mod = new DirectoryAttributeModification
+            {
+                Name = "userPassword",
+                Operation = DirectoryAttributeOperation.Replace
+            };
+            mod.Add(hashedPassword);
+
+            var request = new ModifyRequest(userDn, mod);
+            connection.SendRequest(request);
+        }
+
+        private static void ChangePasswordAD(LdapConnection connection, string userDn, string newPassword)
+        {
+            try
+            {
+                // AD requires password to be enclosed in quotes and UTF-16LE encoded
+                var quotedPassword = $"\"{newPassword}\"";
+                var passwordBytes = Encoding.Unicode.GetBytes(quotedPassword);
+
+                var mod = new DirectoryAttributeModification
+                {
+                    Name = "unicodePwd",
+                    Operation = DirectoryAttributeOperation.Replace
+                };
+                mod.Add(passwordBytes); // Add as byte array for AD
+
+                var request = new ModifyRequest(userDn, mod);
+                connection.SendRequest(request);
+            }
+            catch (DirectoryOperationException ex)
+            {
+                Console.WriteLine($"AD password change failed: {ex.Message}");
+                throw new InvalidOperationException(
+                    $"Password does not meet AD policy requirements: {ex.Message}",
+                    ex
+                );
+            }
+            catch (LdapException ex) when (ex.ErrorCode == 53) // LDAP_UNWILLING_TO_PERFORM
+            {
+                Console.WriteLine($"AD password policy violation: {ex.Message}");
+                throw new InvalidOperationException(
+                    "Password does not meet Active Directory policy requirements (length, complexity, history).",
+                    ex
+                );
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unexpected error changing AD password: {ex.Message}");
+                throw new InvalidOperationException($"Failed to set password: {ex.Message}", ex);
+            }
+        }
 
         public async Task<CreateUserResponse> CreateUserAsync(CreateUserCommand newUser)
         {
             var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
 
-            // Generate uid (OpenLDAP equivalent of sAMAccountName)
-            var uid = GenerateUid(newUser.FullName);
+            // Generate username based on LDAP type
+            string username;
+            string userRdn; // RDN (Relative Distinguished Name)
 
-            // Check if user exists by uid
-            if (UserExistsByUid(connection, uid))
+            if (_attributeMapper.IsActiveDirectory)
             {
-                throw new InvalidOperationException("User already exists.");
+                username = GenerateSamAccountName(newUser.FullName);
+            }
+            else
+            {
+                username = GenerateUid(newUser.FullName);
+            }
+
+
+            // Check if user exists by username
+            if (UserExistsByUid(connection, username))
+            {
+                throw new InvalidOperationException($"User '{username}' already exists.");
             }
 
             // Check if department OU exists
-            var departmentOuDn = $"ou={newUser.Department},ou=Employees,dc=corp,dc=local";
-            if(!DepartmentOuExists(connection, departmentOuDn))
+            string departmentOuDn;
+            try
             {
-                throw new InvalidOperationException($"Department OU '{newUser.Department}' does not exist.");
+                departmentOuDn = DetermineDepartmentOuDn(connection, newUser.Department);
+                Console.WriteLine($"Using department OU: {departmentOuDn}");
             }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to find department OU: {ex.Message}");
+            }
+
+            userRdn = _attributeMapper.GetUserRdn(username);
 
             string? managerDn = null;
             if (!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
@@ -441,7 +886,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 managerDn = FindUserDn(connection, newUser.ManagerEmail);
                 if (managerDn == null)
                 {
-                    throw new InvalidOperationException("Manager user does not exist.");
+                    throw new InvalidOperationException($"Manager user '{newUser.ManagerEmail}' does not exist.");
                 }
             };
 
@@ -453,137 +898,407 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
 
 
-            // Generate Credentials
-            var uidNumber = GetNextUidNumber(connection);
-            var email = $"{uid}@corp.local";
-            var userDn = $"uid={uid},{departmentOuDn}";
+            // Generate credentials
+            var email = $"{username}@{_ldapSettings.Domain}";
+            var userDn = $"{userRdn},{departmentOuDn}";
             var password = GenerateStrongPassword();
-            var hashedPassword = GenerateSSHAHash(password);
 
+            // Prevent self-management
             if (managerDn != null && managerDn.Equals(userDn, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(
-                    "A user cannot be their own manager."
-                );
+                throw new InvalidOperationException("A user cannot be their own manager.");
             }
-
-            // Create user ->
+            // Split name for attributes
             var nameParts = newUser.FullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var attributes = new List<DirectoryAttribute> { 
-                new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "inetOrgPerson"}),
-                new DirectoryAttribute("cn", newUser.FullName),
-                //new DirectoryAttribute("givenName", nameParts[0]),
-                new DirectoryAttribute("sn",  nameParts.Length > 1 ? nameParts[^1] : nameParts[0]),
-                new DirectoryAttribute("uid", uid),
-                new DirectoryAttribute("userPassword", hashedPassword),
-                new DirectoryAttribute("mail", email),
-                //new DirectoryAttribute("department", newUser.Department), // this attribute is not in OpenLdap
-                new DirectoryAttribute("description", $"Department: {newUser.Department}"),
-                new DirectoryAttribute("title", newUser.Title),
-                new DirectoryAttribute("telephoneNumber", newUser.TelephoneNumber),
-                //new DirectoryAttribute("userAccountControl", "514") // disabled account
-            };
+            var firstName = nameParts.Length > 0 ? nameParts[0] : "";
+            var lastName = nameParts.Length > 1 ? nameParts[^1] : firstName;
 
-            if (managerDn != null)
-            {
-                attributes.Add(
-                    new DirectoryAttribute("manager", managerDn)
-                );
-            }
-            if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
-            {
-                attributes.Add(
-                    new DirectoryAttribute("streetAddress", newUser.StreetAddress)
-                );
-            }
-            if (!string.IsNullOrWhiteSpace(newUser.City))
-            {
-                attributes.Add(
-                    new DirectoryAttribute("l", newUser.City)
-                );
-            }
-            if (!string.IsNullOrWhiteSpace(newUser.State))
-            {
-                attributes.Add(
-                    new DirectoryAttribute("st", newUser.State)
-                );
-            }
-            if (!string.IsNullOrWhiteSpace(newUser.PostalCode))
-            {
-                attributes.Add(
-                    new DirectoryAttribute("postalCode", newUser.PostalCode)
-                );
-            }
-            if (!string.IsNullOrWhiteSpace(newUser.Country))
-            {
-                if (newUser.Country.Length != 2)
-                    throw new InvalidOperationException(
-                        "Country must be a 2-letter ISO code (e.g., IN, US)."
-                    );
+            // Create base attributes based on LDAP type
+            var attributes = new List<DirectoryAttribute>();
 
-                attributes.Add(new DirectoryAttribute("c", newUser.Country.ToUpper()));
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                // AD Server
+                attributes.Add(new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "user" }));
+                attributes.Add(new DirectoryAttribute("cn", newUser.FullName));
+                attributes.Add(new DirectoryAttribute("name", newUser.FullName));
+                attributes.Add(new DirectoryAttribute("givenName", firstName));
+                attributes.Add(new DirectoryAttribute("sn", lastName));
+                attributes.Add(new DirectoryAttribute("sAMAccountName", username));
+                attributes.Add(new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.Domain}"));
+                attributes.Add(new DirectoryAttribute("mail", email));
+                attributes.Add(new DirectoryAttribute("displayName", newUser.FullName));
+
+                // Department handling for AD
+                if (!string.IsNullOrWhiteSpace(newUser.Department))
+                {
+                    attributes.Add(new DirectoryAttribute("department", newUser.Department));
+                }
+
+                // Title
+                if (!string.IsNullOrWhiteSpace(newUser.Title))
+                {
+                    attributes.Add(new DirectoryAttribute("title", newUser.Title));
+                }
+
+                // Telephone
+                if (!string.IsNullOrWhiteSpace(newUser.TelephoneNumber))
+                {
+                    attributes.Add(new DirectoryAttribute("telephoneNumber", newUser.TelephoneNumber));
+                }
+
+                // Description (for department in OpenLDAP style, but AD Server can also use it too)
+                attributes.Add(new DirectoryAttribute("description", $"Department: {newUser.Department}"));
+
+                // Manager
+                if (managerDn != null)
+                {
+                    attributes.Add(new DirectoryAttribute("manager", managerDn));
+                }
+
+                // Address attributes for AD
+                if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
+                {
+                    attributes.Add(new DirectoryAttribute("streetAddress", newUser.StreetAddress));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.City))
+                {
+                    attributes.Add(new DirectoryAttribute("l", newUser.City)); // AD uses 'l' for city
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.State))
+                {
+                    attributes.Add(new DirectoryAttribute("st", newUser.State)); // AD uses 'st' for state
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.PostalCode))
+                {
+                    attributes.Add(new DirectoryAttribute("postalCode", newUser.PostalCode));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.Country))
+                {
+                    attributes.Add(new DirectoryAttribute("c", newUser.Country.ToUpper()));
+                }
+
+                // Initial userAccountControl - set as disabled initially
+                attributes.Add(new DirectoryAttribute("userAccountControl", "514")); // 514 = Disabled account
+
+            }
+            else
+            {
+                // OpenLDAP
+                attributes.Add(new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "inetOrgPerson" }));
+                attributes.Add(new DirectoryAttribute("cn", newUser.FullName));
+                attributes.Add(new DirectoryAttribute("givenName", firstName));
+                attributes.Add(new DirectoryAttribute("sn", lastName));
+                attributes.Add(new DirectoryAttribute("uid", username));
+
+                // Password for OpenLDAP (SSHA hash)
+                var hashedPassword = GenerateSSHAHash(password);
+                attributes.Add(new DirectoryAttribute("userPassword", hashedPassword));
+
+                attributes.Add(new DirectoryAttribute("mail", email));
+
+                // Department in description for OpenLDAP
+                attributes.Add(new DirectoryAttribute("description", $"Department: {newUser.Department}"));
+
+                // Title
+                if (!string.IsNullOrWhiteSpace(newUser.Title))
+                {
+                    attributes.Add(new DirectoryAttribute("title", newUser.Title));
+                }
+
+                // Telephone
+                if (!string.IsNullOrWhiteSpace(newUser.TelephoneNumber))
+                {
+                    attributes.Add(new DirectoryAttribute("telephoneNumber", newUser.TelephoneNumber));
+                }
+
+                // Manager
+                if (managerDn != null)
+                {
+                    attributes.Add(new DirectoryAttribute("manager", managerDn));
+                }
+
+                // Address attributes for OpenLDAP
+                if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
+                {
+                    attributes.Add(new DirectoryAttribute("streetAddress", newUser.StreetAddress));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.City))
+                {
+                    attributes.Add(new DirectoryAttribute("l", newUser.City));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.State))
+                {
+                    attributes.Add(new DirectoryAttribute("st", newUser.State));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.PostalCode))
+                {
+                    attributes.Add(new DirectoryAttribute("postalCode", newUser.PostalCode));
+                }
+                if (!string.IsNullOrWhiteSpace(newUser.Country))
+                {
+                    attributes.Add(new DirectoryAttribute("c", newUser.Country.ToUpper()));
+                }
             }
 
             try
             {
+                // Create the user account
                 var addRequest = new AddRequest(userDn, attributes.ToArray());
                 connection.SendRequest(addRequest);
+
+                Console.WriteLine($"User account created: {userDn}");
+
+                // Handle post-creation tasks based on LDAP type
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    // AD: Set password and enable account
+                    await Task.Delay(200); // Brief delay for AD replication
+
+                    try
+                    {
+                        // Set password for AD account
+                        ChangePasswordAD(connection, userDn, password);
+                        Console.WriteLine($"Password set for AD user: {username}");
+
+                        // Enable the AD account (512 = Normal enabled account)
+                        var enableMod = new DirectoryAttributeModification
+                        {
+                            Name = "userAccountControl",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        enableMod.Add("512"); // Normal enabled account
+
+                        connection.SendRequest(new ModifyRequest(userDn, enableMod));
+                        Console.WriteLine($"AD account enabled: {username}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Failed to set password/enable AD account: {ex.Message}");
+                        // Continue anyway - admin can fix manually
+                    }
+                }
+                else
+                {
+                    // OpenLDAP: Account is already enabled with password set
+                    Console.WriteLine($"OpenLDAP user created with password: {username}");
+                }
+
+                // For OpenLDAP, try to add additional attributes if needed
+                if (!_attributeMapper.IsActiveDirectory)
+                {
+                    try
+                    {
+                        await Task.Delay(100);
+                        UpdateUserAttributes(connection, userDn, newUser, managerDn);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Note: Additional attribute update failed (non-critical): {ex.Message}");
+                    }
+                }
+
+                return new CreateUserResponse
+                {
+                    Username = username,
+                    InitialPassword = password,
+                    Email = email,
+                    DistinguishedName = userDn
+                };
             }
-            catch(DirectoryOperationException ex)
+            catch (DirectoryOperationException ex)
             {
                 Console.WriteLine($"First attempt failed: {ex.Message}");
-                Console.WriteLine("Trying with minimal attributes...");
+                Console.WriteLine("Error details: " + ex.Response?.ErrorMessage);
 
-                var minimalAttributes = new List<DirectoryAttribute>
+                // For AD, try simpler approach
+                if (_attributeMapper.IsActiveDirectory)
                 {
-                    new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "inetOrgPerson" }),
-                    new DirectoryAttribute("cn", newUser.FullName),
-                    new DirectoryAttribute("sn", nameParts.Length > 1 ? nameParts[^1] : nameParts[0]),
-                    new DirectoryAttribute("uid", uid),
-                    new DirectoryAttribute("userPassword", hashedPassword),
-                    new DirectoryAttribute("mail", email)
-                };
+                    Console.WriteLine("Trying minimal AD user creation...");
 
-                var retryRequest = new AddRequest(userDn, minimalAttributes.ToArray());
-                connection.SendRequest(retryRequest);
+                    var minimalAttributes = new List<DirectoryAttribute>
+                    {
+                        new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "user" }),
+                        new DirectoryAttribute("cn", newUser.FullName),
+                        new DirectoryAttribute("sn", lastName),
+                        new DirectoryAttribute("sAMAccountName", username),
+                        new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.Domain}"),
+                        new DirectoryAttribute("userAccountControl", "514") // Disabled initially
+                    };
 
-                await Task.Delay(100);
-                UpdateUserAttributes(connection, userDn, newUser, managerDn);
+                    var retryRequest = new AddRequest(userDn, minimalAttributes.ToArray());
+                    connection.SendRequest(retryRequest);
+                    Console.WriteLine($"Minimal AD user created: {username}");
+
+                    // Try to set password and enable
+                    try
+                    {
+                        await Task.Delay(200);
+                        ChangePasswordAD(connection, userDn, password);
+
+                        var enableMod = new DirectoryAttributeModification
+                        {
+                            Name = "userAccountControl",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        enableMod.Add("512");
+                        connection.SendRequest(new ModifyRequest(userDn, enableMod));
+
+                        Console.WriteLine($"Minimal AD user password set and enabled: {username}");
+                    }
+                    catch (Exception innerEx)
+                    {
+                        Console.WriteLine($"Warning: Could not set password/enable minimal AD user: {innerEx.Message}");
+                    }
+
+                    return new CreateUserResponse
+                    {
+                        Username = username,
+                        InitialPassword = password,
+                        Email = $"{username}@{_ldapSettings.Domain}",
+                        DistinguishedName = userDn
+                    };
+                }
+                else
+                {
+                    // OpenLDAP fallback
+                    Console.WriteLine("Trying with minimal OpenLDAP attributes...");
+
+                    var minimalAttributes = new List<DirectoryAttribute>
+                    {
+                        new DirectoryAttribute("objectClass", new[] { "top", "person", "organizationalPerson", "inetOrgPerson" }),
+                        new DirectoryAttribute("cn", newUser.FullName),
+                        new DirectoryAttribute("sn", lastName),
+                        new DirectoryAttribute("uid", username),
+                        new DirectoryAttribute("userPassword", GenerateSSHAHash(password)),
+                        new DirectoryAttribute("mail", email)
+                    };
+
+                    var retryRequest = new AddRequest(userDn, minimalAttributes.ToArray());
+                    connection.SendRequest(retryRequest);
+
+                    await Task.Delay(100);
+                    UpdateUserAttributes(connection, userDn, newUser, managerDn);
+
+                    return new CreateUserResponse
+                    {
+                        Username = username,
+                        InitialPassword = password,
+                        Email = email,
+                        DistinguishedName = userDn
+                    };
+                }
             }
-            
-
-            // Set password
-            //SetPassword(connection, userDn, password);
-
-            //// Enable account + password never expires
-            //var modifications = new DirectoryAttributeModification
-            //{
-            //    Name = "userAccountControl",
-            //    Operation = DirectoryAttributeOperation.Replace
-            //};
-            //modifications.Add("66048"); // Enabled + Password never expires
-            //connection.SendRequest(new ModifyRequest(userDn, modifications));
-
-            return new CreateUserResponse
+            catch (LdapException ex)
             {
-                Username = uid,
-                InitialPassword = password,
-                Email = email,
-                DistinguishedName = userDn
-            };
+                Console.WriteLine($"LDAP error creating user: {ex.Message} (Error code: {ex.ErrorCode})");
+                throw new InvalidOperationException($"Failed to create user: {ex.Message}", ex);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unexpected error creating user: {ex.Message}");
+                throw new InvalidOperationException($"Failed to create user: {ex.Message}", ex);
+            }
         }
 
-       //-------------------------------------------------------------------------
+        //-------------------------------------------------------------------------
+        private string DetermineDepartmentOuDn(LdapConnection connection, string department)
+        {
+            if (string.IsNullOrWhiteSpace(department))
+                throw new ArgumentException("Department name cannot be empty");
+
+            Console.WriteLine($"Looking for department OU: '{department}'");
+
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                // AD: Try multiple possible OU structures
+                var possiblePaths = new[]
+                {
+            // Standard AD structures
+            $"OU={department},DC=corp,DC=local",
+            $"OU={department},OU=Departments,DC=corp,DC=local",
+            $"OU={department},OU=Employees,DC=corp,DC=local",
+            // For smaller ADs, users might be in CN=Users
+            $"CN=Users,DC=corp,DC=local",
+            // Check if department exists as an OU anywhere
+            SearchForOuAnywhere(connection, department)
+        };
+
+                foreach (var path in possiblePaths.Distinct().Where(p => !string.IsNullOrEmpty(p)))
+                {
+                    try
+                    {
+                        if (DepartmentOuExists(connection, path))
+                        {
+                            Console.WriteLine($"Found AD department at: {path}");
+                            return path;
+                        }
+                    }
+                    catch
+                    {
+                        // Try next path
+                        continue;
+                    }
+                }
+
+                throw new InvalidOperationException(
+                    $"Department OU '{department}' not found in AD. " +
+                    $"Tried locations: {string.Join(", ", possiblePaths.Where(p => !string.IsNullOrEmpty(p)))}");
+            }
+            else
+            {
+                // OpenLDAP: Standard structure
+                var ouPath = $"ou={department},ou=Employees,dc=corp,dc=local";
+
+                if (!DepartmentOuExists(connection, ouPath))
+                {
+                    throw new InvalidOperationException(
+                        $"Department OU '{department}' not found in OpenLDAP. " +
+                        $"Expected: {ouPath}");
+                }
+
+                return ouPath;
+            }
+        }
+
+        private string? SearchForOuAnywhere(LdapConnection connection, string ouName)
+        {
+            try
+            {
+                var searchRequest = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(&(objectClass=organizationalUnit)(|(ou={Escape(ouName)})(name={Escape(ouName)})))",
+                    SearchScope.Subtree,
+                    "distinguishedName"
+                );
+
+                var response = (SearchResponse)connection.SendRequest(searchRequest);
+                var entry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+
+                return entry?.DistinguishedName;
+            }
+            catch
+            {
+                return null;
+            }
+        }
         private bool UserExistsByUid(LdapConnection connection, string uid)
         {
-            var request = new SearchRequest(
-                _ldapSettings.BaseDn,
-                $"(uid={uid})",
-                SearchScope.Subtree,
-                "uid"
-            );
-            var response = (SearchResponse)connection.SendRequest(request);
-            return response.Entries.Count > 0;
+            try
+            {
+                var request = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(uid={Escape(uid)})",
+                    SearchScope.Subtree,
+                    "uid"
+                );
+                var response = (SearchResponse)connection.SendRequest(request);
+                return response.Entries.Count > 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool DepartmentOuExists(LdapConnection connection, string ouDn)
@@ -592,7 +1307,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 var request = new SearchRequest(
                     ouDn,
-                    "(objectClass=organizationalUnit)",
+                    _attributeMapper.GetOuSearchFilter(),
                     SearchScope.Base,
                     "ou"
                 );
@@ -607,14 +1322,16 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         private string GenerateUid(string fullName)
         {
             var baseUid = fullName.ToLower()
-                .Replace(" ", ".")
-                .Replace("'", "")
-                .Replace(",", "");
+               .Replace(" ", ".", StringComparison.Ordinal)
+               .Replace("'", "", StringComparison.Ordinal)
+               .Replace(",", "", StringComparison.Ordinal);
 
             var uid = baseUid;
             int suffix = 1;
 
-            while (UserExistsByUid(_ldapAuthenticator.BindAsServiceAccount(), uid))
+            using var connection = _ldapAuthenticator.BindAsServiceAccount();
+
+            while (UserExistsByUid(connection, uid))
             {
                 uid = $"{baseUid}{suffix}";
                 suffix++;
@@ -632,7 +1349,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 var descMod = new DirectoryAttributeModification
                 {
                     Name = "description",
-                    Operation = DirectoryAttributeOperation.Add
+                    Operation = DirectoryAttributeOperation.Replace
                 };
                 descMod.Add($"Department: {newUser.Department}");
                 modifications.Add(descMod);
@@ -644,7 +1361,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 var mod = new DirectoryAttributeModification
                 {
                     Name = "title",
-                    Operation = DirectoryAttributeOperation.Add
+                    Operation = DirectoryAttributeOperation.Replace
                 };
                 mod.Add(newUser.Title);
                 modifications.Add(mod);
@@ -655,7 +1372,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 var mod = new DirectoryAttributeModification
                 {
                     Name = "telephoneNumber",
-                    Operation = DirectoryAttributeOperation.Add
+                    Operation = DirectoryAttributeOperation.Replace
                 };
                 mod.Add(newUser.TelephoneNumber);
                 modifications.Add(mod);
@@ -666,7 +1383,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 var mod = new DirectoryAttributeModification
                 {
                     Name = "manager",
-                    Operation = DirectoryAttributeOperation.Add
+                    Operation = DirectoryAttributeOperation.Replace
                 };
                 mod.Add(managerDn);
                 modifications.Add(mod);
@@ -679,55 +1396,8 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
-        private int GetNextUidNumber(LdapConnection connection)
-        {
-            // Find the highest existing uidNumber
-            var request = new SearchRequest(
-                _ldapSettings.BaseDn,
-                "(uidNumber=*)",
-                SearchScope.Subtree,
-                "uidNumber"
-            );
-
-            var response = (SearchResponse)connection.SendRequest(request);
-            var maxUidNumber = 10000; // Start from 10000
-
-            foreach (SearchResultEntry entry in response.Entries)
-            {
-                if (entry.Attributes.Contains("uidNumber"))
-                {
-                    var uidNumberStr = entry.Attributes["uidNumber"][0].ToString();
-                    if (int.TryParse(uidNumberStr, out var uidNumber))
-                    {
-                        maxUidNumber = Math.Max(maxUidNumber, uidNumber);
-                    }
-                }
-            }
-
-            return maxUidNumber + 1;
-        }
         private bool ValidatePasswordPolicy(string password)
         {
-            //// Minimum length
-            //if (password.Length < 8)
-            //    throw new InvalidOperationException("Password must be at least 8 characters long.");
-
-            //// Complexity requirements
-            //var hasUpper = password.Any(char.IsUpper);
-            //var hasLower = password.Any(char.IsLower);
-            //var hasDigit = password.Any(char.IsDigit);
-            //var hasSpecial = password.Any(ch => !char.IsLetterOrDigit(ch));
-
-            //var complexityScore = (hasUpper ? 1 : 0) + (hasLower ? 1 : 0) +
-            //                     (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
-
-            //if (complexityScore < 3)
-            //    throw new InvalidOperationException(
-            //        "Password must contain at least 3 of: uppercase, lowercase, digits, special characters.");
-
-            //return true;
-
-
             if (password.Length < 8)
             {
                 throw new InvalidOperationException("Password must be at least 8 characters long.");
@@ -794,17 +1464,29 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
         private string? FindUserDn(LdapConnection connection, string email)
         {
-            var request = new SearchRequest(
-                _ldapSettings.BaseDn,
-                $"(mail={Escape(email)})",
-                SearchScope.Subtree,
-                "distinguishedName"
-            );
+            try
+            {
+                string emailAttribute = _attributeMapper.IsActiveDirectory
+                           ? "userPrincipalName"
+                           : "mail";
 
-            var response = (SearchResponse)connection.SendRequest(request);
-            return response.Entries.Cast<SearchResultEntry>()
-                .FirstOrDefault()
-                ?.DistinguishedName;
+                var request = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"({emailAttribute}={Escape(email)})",
+                    SearchScope.Subtree,
+                    "distinguishedName"
+                );
+
+                var response = (SearchResponse)connection.SendRequest(request);
+                return response.Entries.Cast<SearchResultEntry>()
+                    .FirstOrDefault()
+                    ?.DistinguishedName;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error finding user by email '{email}': {ex.Message}");
+                return null;
+            }
         }
 
         private static string Escape(string value)
@@ -817,17 +1499,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 .Replace("\0", "\\00");
         }
 
-        private bool UserExistsBySamAsync(LdapConnection connection, string samAccountName)
-        {
-            var request = new SearchRequest(
-                _ldapSettings.BaseDn,
-                $"(sAMAccountName={samAccountName})",
-                SearchScope.Subtree,
-                "sAMAccountName"
-            );
-            var response = (SearchResponse)connection.SendRequest(request);
-            return response.Entries.Count > 0;
-        }
         public string GenerateSamAccountName(string fullName)
         {
             var baseName = fullName.Replace(" ", "").ToLower();
@@ -848,32 +1519,34 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
-        private void SetPassword(LdapConnection connection, string userDn, string password)
-        {
-            //var pwdBytes = Encoding.Unicode.GetBytes($"\"{password}\"");
-            var hashedPassword = GenerateSSHAHash(password);
-            var mod = new DirectoryAttributeModification
-            {
-                Name = "userPassword",
-                Operation = DirectoryAttributeOperation.Replace
-            };
-            mod.Add(hashedPassword);
-            connection.SendRequest(new ModifyRequest(userDn, mod));
-        }
-
         private string GetDepartmentOuDnAsync(LdapConnection connection, string department)
         {
-            var request = new SearchRequest(
-                _ldapSettings.BaseDn,
-                $"(&(objectClass=organizationalUnit)(ou={department}))",
-                SearchScope.Subtree,
-                "distinguishedName"
-            );
+            try
+            {
+                string objectClass = _attributeMapper.IsActiveDirectory
+                        ? "organizationalUnit"
+                        : "organizationalUnit";
 
-            var response = (SearchResponse)connection.SendRequest(request);
-            var ouEntry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
-            if (ouEntry == null) throw new InvalidOperationException("Department OU does not exist.");
-            return ouEntry.DistinguishedName;
+                string nameAttribute = _attributeMapper.IsActiveDirectory
+                           ? "name"  // AD often uses 'name' attribute
+                           : "ou";   // OpenLDAP uses 'ou' attribute
+
+                var request = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(&(objectClass={objectClass})(|({nameAttribute}={Escape(department)})(ou={Escape(department)})))",
+                    SearchScope.Subtree,
+                    "distinguishedName"
+                );
+
+                var response = (SearchResponse)connection.SendRequest(request);
+                var ouEntry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+                if (ouEntry == null) throw new InvalidOperationException("Department OU does not exist.");
+                return ouEntry.DistinguishedName;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Error finding department OU '{department}': {ex.Message}", ex);
+            }
         }
 
         public async Task UpdateUserAsAdminAsync(AdminUpdateUserCommand command)
@@ -885,91 +1558,145 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 // 1️. Resolve user DN
                 var userDn = FindUserDnByEmail(connection, command.Email) ?? throw new InvalidOperationException($"Target user with email '{command.Email}' not found.");
 
-
-                // V.IMP : Get current descriotion to preserve other unchanged information
-                string currentDescription = "";
-                try
+                // 2️. Handle department change: OU move
+                string? newUserDn = null;
+                var modifications = new List<DirectoryAttributeModification>();
+                if (!string.IsNullOrWhiteSpace(command.Department))
                 {
-                    var searchRequest = new SearchRequest(
+                    if (_attributeMapper.IsActiveDirectory)
+                    {
+                        var deptMod = new DirectoryAttributeModification
+                        {
+                            Name = "department",  // AD attribute name
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        deptMod.Add(command.Department);
+                        modifications.Add(deptMod);
+
+                        Console.WriteLine($"AD: Updating department attribute to '{command.Department}'");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var targetOuDn = GetDepartmentOuDnAsync(connection, command.Department);
+                            // Check if we're already in the target OU
+                            var currentParentDn = GetParentOuDn(userDn);
+                            if (!string.Equals(currentParentDn, targetOuDn, StringComparison.OrdinalIgnoreCase))
+                            {
+                                MoveUserToOu(connection, userDn, targetOuDn);
+
+                                // After move, DN changes: recompute
+                                var uid = ExtractUidFromDn(userDn);
+                                newUserDn = $"uid={uid},{targetOuDn}";
+
+                                Console.WriteLine($"OpenLDAP: Moved user to OU '{targetOuDn}'");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"OpenLDAP: User already in department OU '{targetOuDn}'");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not move user to department OU: {ex.Message}");
+                        }
+                    }
+                }
+                // Use new DN if user was moved
+                var effectiveUserDn = newUserDn ?? userDn;
+
+                if (!_attributeMapper.IsActiveDirectory)
+                {
+                    string currentDescription = "";
+                    try
+                    {
+                        var searchRequest = new SearchRequest(
                             userDn,
                             "(objectClass=inetOrgPerson)",
                             SearchScope.Base,
                             "description"
-                    );
+                        );
 
-                    var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
-                    var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault();
-                    if (entry != null && entry.Attributes.Contains("description"))
-                    {
-                        currentDescription = entry.Attributes["description"][0]?.ToString() ?? "";
+                        var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
+                        var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+                        if (entry != null && entry.Attributes.Contains("description"))
+                        {
+                            currentDescription = entry.Attributes["description"][0]?.ToString() ?? "";
+                        }
                     }
-                }
-                catch
-                {
-                    throw new InvalidOperationException("Existing Description Not Found.");
-                }
-
-                // Parse current description attributes
-                var descriptionAttributes = ParseDescriptionAttributes(currentDescription);
-
-
-                // 2️. Handle department change: OU move
-                string? newUserDn = null;
-                if (!string.IsNullOrWhiteSpace(command.Department))
-                {
-                    var targetOuDn = GetDepartmentOuDnAsync(connection, command.Department);
-                    MoveUserToOu(connection, userDn, targetOuDn);
-
-                    // After move, DN changes: recompute
-                    var uid = ExtractUidFromDn(userDn);
-                    newUserDn = $"uid={uid},{targetOuDn}";
-
-                    // Update department in description attributes
-                    descriptionAttributes["Department"] = command.Department;
-                }
-                // Use new DN if user was moved
-                var effectiveUserDn = newUserDn ?? userDn;
-                var modifications = new List<DirectoryAttributeModification>();
-
-                // Update description with both department and preserved account status
-                if (!string.IsNullOrWhiteSpace(command.Department) || !string.IsNullOrWhiteSpace(currentDescription))
-                {
-                    var newDescriptionParts = new List<string>();
-
-                    string department = !string.IsNullOrWhiteSpace(command.Department)
-                        ? command.Department
-                        : (descriptionAttributes.TryGetValue("Department", out var existingDept) ? existingDept : "");
-
-                    if (!string.IsNullOrWhiteSpace(department))
+                    catch
                     {
-                        newDescriptionParts.Add($"Department: {department}");
+                        Console.WriteLine($"Note: Could not retrieve description for {userDn}");
                     }
 
-                    // Preserve account status if exists
-                    if (descriptionAttributes.TryGetValue("Account Status", out var accountStatus))
+                    if (!string.IsNullOrWhiteSpace(command.Department) || !string.IsNullOrWhiteSpace(currentDescription))
                     {
-                        newDescriptionParts.Add($"Account Status: {accountStatus}");
-                    }
-                    else if (descriptionAttributes.TryGetValue("Status", out var altStatus))
-                    {
-                        newDescriptionParts.Add($"Account Status: {altStatus}");
-                    }
-                    else
-                    {
-                        // Default to Active if no status found
-                        newDescriptionParts.Add("Account Status: Active");
-                    }
+                        // Parse current description attributes
+                        var descriptionAttributes = ParseDescriptionAttributes(currentDescription);
 
-                    string newDescription = string.Join("; ", newDescriptionParts);
+                        // Update department if provided
+                        if (!string.IsNullOrWhiteSpace(command.Department))
+                        {
+                            descriptionAttributes["Department"] = command.Department;
+                        }
 
-                    // Also update description for compatibility
-                    var descMod = new DirectoryAttributeModification
-                    {
-                        Name = "description",
-                        Operation = DirectoryAttributeOperation.Replace
-                    };
-                    descMod.Add(newDescription);
-                    modifications.Add(descMod);
+                        var newDescriptionParts = new List<string>();
+
+                        // Add department if exists
+                        if (descriptionAttributes.TryGetValue("Department", out var department))
+                        {
+                            newDescriptionParts.Add($"Department: {department}");
+                        }
+
+                        // Preserve account status if exists
+                        if (descriptionAttributes.TryGetValue("Account Status", out var accountStatus))
+                        {
+                            newDescriptionParts.Add($"Account Status: {accountStatus}");
+                        }
+                        else if (descriptionAttributes.TryGetValue("Status", out var altStatus))
+                        {
+                            newDescriptionParts.Add($"Account Status: {altStatus}");
+                        }
+                        else if (newDescriptionParts.Any())
+                        {
+                            // Only add default if we're creating a description
+                            newDescriptionParts.Add("Account Status: Active");
+                        }
+
+                        // Add other preserved attributes (excluding those already handled)
+                        foreach (var kvp in descriptionAttributes)
+                        {
+                            if (kvp.Key.Equals("Department", StringComparison.OrdinalIgnoreCase) ||
+                                kvp.Key.Equals("Account Status", StringComparison.OrdinalIgnoreCase) ||
+                                kvp.Key.Equals("Status", StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(kvp.Value))
+                            {
+                                newDescriptionParts.Add($"{kvp.Key}: {kvp.Value}");
+                            }
+                        }
+
+                        // Only update description if we have content
+                        if (newDescriptionParts.Any())
+                        {
+                            string newDescription = string.Join("; ", newDescriptionParts);
+
+                            var descMod = new DirectoryAttributeModification
+                            {
+                                Name = "description",
+                                Operation = DirectoryAttributeOperation.Replace
+                            };
+                            descMod.Add(newDescription);
+                            modifications.Add(descMod);
+
+                            Console.WriteLine($"OpenLDAP: Updated description: {newDescription}");
+                        }
+
+                    }
                 }
 
                 if (!string.IsNullOrWhiteSpace(command.Title))
@@ -1004,7 +1731,20 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
                 if (modifications.Any())
                 {
-                    connection.SendRequest(new ModifyRequest(effectiveUserDn, modifications.ToArray()));
+                    try
+                    {
+                        connection.SendRequest(new ModifyRequest(effectiveUserDn, modifications.ToArray()));
+                        Console.WriteLine($"Successfully applied {modifications.Count} updates to {effectiveUserDn}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error applying modifications: {ex.Message}");
+                        throw new InvalidOperationException($"Failed to update user: {ex.Message}", ex);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"No modifications to apply for {userDn}");
                 }
             });
         }
@@ -1035,6 +1775,9 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
         private static string ExtractUidFromDn(string userDn)
         {
+            if (string.IsNullOrEmpty(userDn))
+                return string.Empty;
+
             var rdn = userDn.Split(',')[0];
             if (rdn.StartsWith("uid=", StringComparison.OrdinalIgnoreCase)) return rdn.Substring(4); // Remove "uid="
             if (rdn.StartsWith("cn=", StringComparison.OrdinalIgnoreCase)) return rdn.Substring(3); // Remove "cn="
@@ -1045,9 +1788,13 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             try
             {
+                string emailAttribute = _attributeMapper.IsActiveDirectory
+                        ? "userPrincipalName"  // AD uses UPN
+                        : "mail";
+
                 var request = new SearchRequest(
                     _ldapSettings.BaseDn,
-                    $"(mail={Escape(email)})",
+                    $"({emailAttribute}={Escape(email)})",
                     SearchScope.Subtree,
                     "distinguishedName"
                 );
@@ -1094,44 +1841,60 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 var userDn = FindUserDn(connection, command.Email)
                     ?? throw new InvalidOperationException($"User with email '{command.Email}' not found.");
 
-                // First, get current description
-                var searchRequest = new SearchRequest(
+                if (_attributeMapper.IsActiveDirectory && _attributeMapper.UseAdAccountControl)
+                {
+                    var adValue = _attributeMapper.GetAdAccountControlValue(command.IsEnabled);
+
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = "userAccountControl",
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    mod.Add(adValue);
+
+                    connection.SendRequest(new ModifyRequest(userDn, mod));
+                }
+                else
+                {
+                    // First, get current description
+                    var searchRequest = new SearchRequest(
                     userDn,
                     "(objectClass=inetOrgPerson)",
                     SearchScope.Base,
                     "description"
-                );
-                var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
-                var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault()
-                    ?? throw new InvalidOperationException("User not found.");
+                    );
+                    var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
+                    var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault()
+                        ?? throw new InvalidOperationException("User not found.");
 
-                string currentDescription = "";
-                if(entry != null && entry.Attributes.Contains("description"))
-                {
-                    currentDescription = entry.Attributes["description"][0]?.ToString() ?? "";
-                }
+                    string currentDescription = "";
+                    if (entry != null && entry.Attributes.Contains("description"))
+                    {
+                        currentDescription = entry.Attributes["description"][0]?.ToString() ?? "";
+                    }
 
-                var descriptionAttributes = ParseDescriptionAttributes(currentDescription);
+                    var descriptionAttributes = ParseDescriptionAttributes(currentDescription);
 
-                string newDescription = BuildDescriptionString(descriptionAttributes, command.IsEnabled);
+                    string newDescription = BuildDescriptionString(descriptionAttributes, command.IsEnabled);
 
-                var mod = new DirectoryAttributeModification
-                {
-                    Name = "description",
-                    Operation = DirectoryAttributeOperation.Replace
-                    //Operation = command.IsEnabled
-                    //            ? DirectoryAttributeOperation.Delete  // Remove lock
-                    //            : DirectoryAttributeOperation.Replace // Set lock (000001010000Z means locked)
-                };
-                mod.Add(newDescription);
-                try
-                {
-                    connection.SendRequest(new ModifyRequest(userDn, mod));
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error updating user status: {ex.Message}");
-                    throw;
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = "description",
+                        Operation = DirectoryAttributeOperation.Replace
+                        //Operation = command.IsEnabled
+                        //            ? DirectoryAttributeOperation.Delete  // Remove lock
+                        //            : DirectoryAttributeOperation.Replace // Set lock (000001010000Z means locked)
+                    };
+                    mod.Add(newDescription);
+                    try
+                    {
+                        connection.SendRequest(new ModifyRequest(userDn, mod));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error updating user status: {ex.Message}");
+                        throw;
+                    }
                 }
             });
         }

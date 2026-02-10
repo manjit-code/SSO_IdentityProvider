@@ -63,10 +63,18 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 {
                     // First, bind as service account to search for user
                     using var searchConnection = BindAsServiceAccount();
-                    var searchFilter = $"(uid={username})";
-                    if (username.EndsWith("@corp.local", StringComparison.OrdinalIgnoreCase))
+                    string searchFilter;
+                    if (username.Contains("@")) // email
                     {
-                        searchFilter = $"(mail={username})";
+                        searchFilter = _ldapSettings.LdapType == LdapType.ActiveDirectory
+                            ? $"(userPrincipalName={username})"
+                            : $"(mail={username})";
+                    }
+                    else
+                    {
+                        searchFilter = _ldapSettings.LdapType == LdapType.ActiveDirectory
+                            ? $"(sAMAccountName={username})"
+                            : $"(uid={username})";
                     }
 
                     var searchRequest = new SearchRequest(
@@ -86,15 +94,31 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
                     var userDn = userEntry.DistinguishedName;
 
-                    //----- Bind with user credentials
-                    var connection = BindToOpenLdap(
+                    // Bind with user credentials
+                    var identifier = new LdapDirectoryIdentifier(
                         _ldapSettings.Host,
                         _ldapSettings.Port,
                         _ldapSettings.UseSsl,
-                        userDn,
-                        password
+                        false
                     );
 
+                    var connection = new LdapConnection(identifier)
+                    {
+                        AuthType = AuthType.Basic,
+                        Credential = new NetworkCredential(userDn, password)
+                    };
+                    if (_ldapSettings.LdapType == LdapType.OpenLDAP)
+                    {
+                        connection.SessionOptions.ProtocolVersion = 3;
+                    }
+
+                    if (_ldapSettings.UseSsl)
+                    {
+                        connection.SessionOptions.SecureSocketLayer = true;
+                        connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
+                    }
+
+                    connection.Bind();
                     return connection;
                 }
                 catch (LdapException ldapEx) when (ldapEx.ErrorCode == 49)

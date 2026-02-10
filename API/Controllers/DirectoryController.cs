@@ -6,6 +6,7 @@ using SSO_IdentityProvider.API.DTOs;
 using SSO_IdentityProvider.Application.Services;
 using SSO_IdentityProvider.Domain.Entities;
 using SSO_IdentityProvider.Infrastructure.Configuration;
+using System;
 using System.DirectoryServices.Protocols;
 using System.Security.Claims;
 
@@ -40,23 +41,62 @@ namespace SSO_IdentityProvider.API.Controllers
         }
 
 
+        //[HttpPost("search")]
+        //[Authorize]
+        //public async Task<IActionResult> SearchUsers([FromBody] SearchUsersRequest request)
+        //{
+        //    var criteria = new UserSearchCriteria
+        //    {
+        //        BaseDn = _ldapSettings.BaseDn,
+        //        Filters = request.Filters,
+        //        Attributes = request.IncludeAttributes?.Any() == true
+        //         ? request.IncludeAttributes
+        //         : new List<string> { "cn", "uid", "mobile", "mail", "distinguishedName", "memberOf", "description" },
+        //        Scope = SearchScope.Subtree,
+        //        MaxResults = Math.Clamp(request.MaxResults, 1, 100)
+        //    };
+
+        //    var results = await _directoryService.SearchUsersAsync(criteria);
+        //    return Ok(results);
+        //}
+
         [HttpPost("search")]
         [Authorize]
         public async Task<IActionResult> SearchUsers([FromBody] SearchUsersRequest request)
         {
-            var criteria = new UserSearchCriteria
+            try
             {
-                BaseDn = _ldapSettings.BaseDn,
-                Filters = request.Filters?.Any() == true ? request.Filters : new Dictionary<string, string> { { "objectClass", "inetOrgPerson" } },
-                Attributes = request.IncludeAttributes?.Any() == true
-                 ? request.IncludeAttributes
-                 : new List<string> { "cn", "uid", "mobile", "mail", "distinguishedName", "memberOf", "description" },
-                Scope = SearchScope.Subtree,
-                MaxResults = Math.Clamp(request.MaxResults, 1, 100)
-            };
+                // Prepare search criteria
+                var criteria = new UserSearchCriteria
+                {
+                    BaseDn = _ldapSettings.BaseDn, // Use configured base DN
+                    Filters = request.Filters ?? new Dictionary<string, string>(),
+                    Attributes = request.IncludeAttributes ?? new List<string>
+                    {
+                        "Username",
+                        "DisplayName",
+                        "Email",
+                        "Department",
+                        "Status"
+                    },
+                    Scope = SearchScope.Subtree,
+                    MaxResults = Math.Clamp(request.MaxResults, 1, 1000)
+                };
 
-            var results = await _directoryService.SearchUsersAsync(criteria);
-            return Ok(results);
+                var results = await _directoryService.SearchUsersAsync(criteria);
+                Console.WriteLine($"Search completed. Found {results.Count} results.");
+
+                return Ok(new
+                {
+                    Count = results.Count,
+                    Results = results
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Search error: {ex.Message}");
+                return StatusCode(500, new { Error = "Search failed", Message = ex.Message });
+            }
         }
 
         [HttpPatch("update-my-profile")]

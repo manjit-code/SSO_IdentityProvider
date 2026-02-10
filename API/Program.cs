@@ -6,6 +6,7 @@ using SSO_IdentityProvider.Domain.Interfaces;
 using SSO_IdentityProvider.Domain.Interfaces.OAuth;
 using SSO_IdentityProvider.Infrastructure.Configuration;
 using SSO_IdentityProvider.Infrastructure.Ldap;
+using SSO_IdentityProvider.Infrastructure.Mapper;
 using SSO_IdentityProvider.Infrastructure.OAuth;
 using SSO_IdentityProvider.Infrastructure.Security;
 using StackExchange.Redis;
@@ -58,10 +59,9 @@ builder.Services.AddSwaggerGen(options =>
 
 // Configuration Binding
 builder.Services.Configure<LdapSettings>( builder.Configuration.GetSection("LdapSettings"));
-
 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
-
 builder.Services.Configure<LdapInfraSettings>(builder.Configuration.GetSection("LdapInfraSettings"));
+
 // Dependency Injection
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 builder.Services.AddScoped<ILdapAuthenticator, LdapAuthenticationService>();
@@ -74,6 +74,8 @@ builder.Services.AddSingleton<IAuthorizationCodeStore, InMemoryAuthorizationCode
 builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 
 builder.Services.AddScoped<OAuthService>();
+
+builder.Services.AddScoped<AttributeMapper>();
 
 // JWT Authentication
 builder.Services

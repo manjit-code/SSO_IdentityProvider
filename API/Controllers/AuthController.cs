@@ -32,7 +32,9 @@ namespace SSO_IdentityProvider.API.Controllers
             {
                 var identifier = new LdapDirectoryIdentifier(
                     _ldapSettings.Host,
-                    _ldapSettings.Port
+                    _ldapSettings.Port,
+                    _ldapSettings.UseSsl,
+                    false
                 );
 
                 var credential = new NetworkCredential(_ldapSettings.username, _ldapSettings.password);
@@ -43,9 +45,20 @@ namespace SSO_IdentityProvider.API.Controllers
                 };
 
                 connection.SessionOptions.ProtocolVersion = 3;
+                if (_ldapSettings.UseSsl)
+                {
+                    connection.SessionOptions.SecureSocketLayer = true;
+                    connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
+                }
                 connection.Bind();
 
-                return Ok("LDAP reachable and credentials valid");
+                return Ok(new
+                {
+                    Status = "LDAP reachable and credentials valid",
+                    Host = _ldapSettings.Host,
+                    Port = _ldapSettings.Port,
+                    UseSsl = _ldapSettings.UseSsl
+                });
             }
             catch (Exception ex)
             {

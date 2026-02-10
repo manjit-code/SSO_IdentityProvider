@@ -1,4 +1,5 @@
-﻿using System;
+﻿using SSO_IdentityProvider.Infrastructure.Mapper;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -18,9 +19,16 @@ namespace SSO_IdentityProvider.Infrastructure.Configuration
         public string password { get; set; } = string.Empty;
 
 
-        // Add account status attribute configuration
-        public string AccountStatusAttribute { get; set; } = "description";
-        public string EnabledStatusValue { get; set; } = "Account Status: Active";
-        public string DisabledStatusValue { get; set; } = "Account Status: Disabled";
+        public LdapType LdapType { get; set; } = LdapType.OpenLDAP;
+
+        // Attribute mapping configuration
+        public AttributeMapping AttributeMappings { get; set; } = new();
+
+        // Helper properties for backward compatibility
+        [Obsolete("Use AttributeMappings.AccountStatusAttribute instead")]
+        public string AccountStatusAttribute => AttributeMappings.AccountStatusAttribute;
+
+        [Obsolete("Use AttributeMappings.DepartmentAttribute instead")]
+        public string DepartmentAttribute => AttributeMappings.DepartmentAttribute;
     }
 }
