@@ -719,8 +719,9 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     if (_attributeMapper.IsActiveDirectory)
                     {
                         ReplaceIfProvided("displayName", profile.DisplayName);
-                        // Also update cn for consistency
-                        ReplaceIfProvided("cn", profile.DisplayName);
+
+                        // rename the CN/RDN (use with caution)
+                        //RenameUserInAD(connection, userDn, profile.DisplayName);
                     }
                     else
                     {
@@ -752,7 +753,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             });
         }
-
         private void ChangePassword(LdapConnection connection, string userDn, string newPassword)
         {
             try
@@ -853,17 +853,22 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             if (_attributeMapper.IsActiveDirectory)
             {
                 username = GenerateSamAccountName(newUser.FullName);
+                if (UserExistsBySamAccountName(connection, username))
+                {
+                    throw new InvalidOperationException($"User '{username}' already exists.");
+                }
+
+                var commonName = GenerateCommonName(newUser.FullName);
+                userRdn = $"CN={EscapeDnValue(commonName)}";
             }
             else
             {
                 username = GenerateUid(newUser.FullName);
-            }
-
-
-            // Check if user exists by username
-            if (UserExistsByUid(connection, username))
-            {
-                throw new InvalidOperationException($"User '{username}' already exists.");
+                if (UserExistsByUid(connection, username))
+                {
+                    throw new InvalidOperationException($"User '{username}' already exists.");
+                }
+                userRdn = $"uid={EscapeDnValue(username)}";
             }
 
             // Check if department OU exists
@@ -877,8 +882,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 throw new InvalidOperationException($"Failed to find department OU: {ex.Message}");
             }
-
-            userRdn = _attributeMapper.GetUserRdn(username);
 
             string? managerDn = null;
             if (!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
@@ -1211,43 +1214,33 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             if (_attributeMapper.IsActiveDirectory)
             {
-                // AD: Try multiple possible OU structures
-                var possiblePaths = new[]
-                {
-            // Standard AD structures
-            $"OU={department},DC=corp,DC=local",
-            $"OU={department},OU=Departments,DC=corp,DC=local",
-            $"OU={department},OU=Employees,DC=corp,DC=local",
-            // For smaller ADs, users might be in CN=Users
-            $"CN=Users,DC=corp,DC=local",
-            // Check if department exists as an OU anywhere
-            SearchForOuAnywhere(connection, department)
-        };
+                // AD: First check if the department OU exists under Employees
+                var escapedDepartment = EscapeOuName(department);
+                var standardPath = $"OU={escapedDepartment},OU=Employees,{_ldapSettings.BaseDn}";
 
-                foreach (var path in possiblePaths.Distinct().Where(p => !string.IsNullOrEmpty(p)))
+                if (DepartmentOuExists(connection, standardPath))
                 {
-                    try
-                    {
-                        if (DepartmentOuExists(connection, path))
-                        {
-                            Console.WriteLine($"Found AD department at: {path}");
-                            return path;
-                        }
-                    }
-                    catch
-                    {
-                        // Try next path
-                        continue;
-                    }
+                    Console.WriteLine($"Found AD department at: {standardPath}");
+                    return standardPath;
                 }
 
+                // If not, check if it exists directly under base
+                var directPath = $"OU={Escape(department)},{_ldapSettings.BaseDn}";
+                if (DepartmentOuExists(connection, directPath))
+                {
+                    Console.WriteLine($"Found AD department at: {directPath}");
+                    return directPath;
+                }
+
+                // If department OU doesn't exist, throw helpful error
                 throw new InvalidOperationException(
                     $"Department OU '{department}' not found in AD. " +
-                    $"Tried locations: {string.Join(", ", possiblePaths.Where(p => !string.IsNullOrEmpty(p)))}");
+                    $"Checked locations: {standardPath}, {directPath}. " +
+                    $"Please create the OU first or use an existing department.");
             }
             else
             {
-                // OpenLDAP: Standard structure
+                // OpenLDAP: Standard structure (lowercase for OpenLDAP)
                 var ouPath = $"ou={department},ou=Employees,dc=corp,dc=local";
 
                 if (!DepartmentOuExists(connection, ouPath))
@@ -1258,28 +1251,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 }
 
                 return ouPath;
-            }
-        }
-
-        private string? SearchForOuAnywhere(LdapConnection connection, string ouName)
-        {
-            try
-            {
-                var searchRequest = new SearchRequest(
-                    _ldapSettings.BaseDn,
-                    $"(&(objectClass=organizationalUnit)(|(ou={Escape(ouName)})(name={Escape(ouName)})))",
-                    SearchScope.Subtree,
-                    "distinguishedName"
-                );
-
-                var response = (SearchResponse)connection.SendRequest(searchRequest);
-                var entry = response.Entries.Cast<SearchResultEntry>().FirstOrDefault();
-
-                return entry?.DistinguishedName;
-            }
-            catch
-            {
-                return null;
             }
         }
         private bool UserExistsByUid(LdapConnection connection, string uid)
@@ -1300,7 +1271,67 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 return false;
             }
         }
+        private static string EscapeDnValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
 
+            // Escape characters that need escaping in DN values
+            var sb = new StringBuilder();
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case ',':
+                        sb.Append("\\,");
+                        break;
+                    case '\\':
+                        sb.Append("\\\\");
+                        break;
+                    case '#':
+                        sb.Append("\\#");
+                        break;
+                    case '+':
+                        sb.Append("\\+");
+                        break;
+                    case '"':
+                        sb.Append("\\\"");
+                        break;
+                    case '<':
+                        sb.Append("\\<");
+                        break;
+                    case '>':
+                        sb.Append("\\>");
+                        break;
+                    case ';':
+                        sb.Append("\\;");
+                        break;
+                    default:
+                        sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+
+        }
+
+        private bool UserExistsBySamAccountName(LdapConnection connection, string samAccountName)
+        {
+            try
+            {
+                var request = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(sAMAccountName={Escape(samAccountName)})",
+                    SearchScope.Subtree,
+                    "sAMAccountName"
+                );
+                var response = (SearchResponse)connection.SendRequest(request);
+                return response.Entries.Count > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
         private bool DepartmentOuExists(LdapConnection connection, string ouDn)
         {
             try
@@ -1321,10 +1352,18 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         }
         private string GenerateUid(string fullName)
         {
-            var baseUid = fullName.ToLower()
-               .Replace(" ", ".", StringComparison.Ordinal)
-               .Replace("'", "", StringComparison.Ordinal)
-               .Replace(",", "", StringComparison.Ordinal);
+            // For OpenLDAP: similar format but ensure it works for both
+            var nameParts = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (nameParts.Length < 2)
+            {
+                return fullName.ToLowerInvariant();
+            }
+
+            var firstName = nameParts[0].ToLowerInvariant();
+            var lastName = nameParts[^1].ToLowerInvariant();
+            var baseUid = $"{firstName}.{lastName}";
+
+            baseUid = System.Text.RegularExpressions.Regex.Replace(baseUid, @"[^a-z0-9.]", "");
 
             var uid = baseUid;
             int suffix = 1;
@@ -1498,24 +1537,63 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 .Replace(")", "\\29")
                 .Replace("\0", "\\00");
         }
+        private string EscapeOuName(string ouName)
+        {
+            if (string.IsNullOrEmpty(ouName)) return ouName;
 
+            // Escape special characters in OU names
+            return ouName
+                .Replace("\\", "\\\\")
+                .Replace(",", "\\,")
+                .Replace("#", "\\#")
+                .Replace("+", "\\+")
+                .Replace("\"", "\\\"")
+                .Replace("<", "\\<")
+                .Replace(">", "\\>")
+                .Replace(";", "\\;")
+                .Replace("=", "\\=");
+        }
+
+        private string GenerateCommonName(string fullName)
+        {
+            // CN should be the full name without dots, just spaces
+            // For "Parth Sharma", CN should be "Parth Sharma" not "parth.sharma"
+            return fullName.Trim();
+        }
         public string GenerateSamAccountName(string fullName)
         {
-            var baseName = fullName.Replace(" ", "").ToLower();
+            // Generate base username with dots for sAMAccountName: "parth.sharma"
+            var nameParts = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (nameParts.Length < 2)
+            {
+                // Single name - just lowercase it
+                return fullName.ToLowerInvariant();
+            }
+
+            // Format: firstname.lastname (lowercase) for sAMAccountName
+            var firstName = nameParts[0].ToLowerInvariant();
+            var lastName = nameParts[^1].ToLowerInvariant();
+            var baseName = $"{firstName}.{lastName}";
+
+            // Clean up special characters (keep dots for sAMAccountName)
+            baseName = System.Text.RegularExpressions.Regex.Replace(baseName, @"[^a-z0-9.]", "");
+
             var samAccountName = baseName;
             int suffix = 1;
-            while (true)
+
+            // Check if username exists
+            using (var connection = _ldapAuthenticator.BindAsServiceAccount())
             {
-                var existingUser = GetByUsernameAsync(
-                    _ldapAuthenticator.BindAsServiceAccount(),
-                    samAccountName
-                ).Result;
-                if (existingUser == null)
+                while (true)
                 {
-                    return samAccountName;
+                    var existingUser = GetByUsernameAsync(connection, samAccountName).Result;
+                    if (existingUser == null)
+                    {
+                        return samAccountName;
+                    }
+                    samAccountName = $"{baseName}{suffix}";
+                    suffix++;
                 }
-                samAccountName = $"{baseName}{suffix}";
-                suffix++;
             }
         }
 
@@ -1565,15 +1643,56 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 {
                     if (_attributeMapper.IsActiveDirectory)
                     {
-                        var deptMod = new DirectoryAttributeModification
+                        try
                         {
-                            Name = "department",  // AD attribute name
-                            Operation = DirectoryAttributeOperation.Replace
-                        };
-                        deptMod.Add(command.Department);
-                        modifications.Add(deptMod);
+                            // Find target OU for the new department
+                            var targetOuDn = GetDepartmentOuDnForMove(connection, command.Department);
 
-                        Console.WriteLine($"AD: Updating department attribute to '{command.Department}'");
+                            // Check if we're already in the target OU
+                            var currentParentDn = GetParentOuDn(userDn);
+
+                            if (!string.Equals(currentParentDn, targetOuDn, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Extract the RDN (CN=...) from current DN
+                                var rdn = GetRdnFromDn(userDn);
+
+                                // Move user to new OU
+                                ADMoveUserToOu(connection, userDn, targetOuDn);
+
+                                // Update DN after move
+                                newUserDn = $"{rdn},{targetOuDn}";
+
+                                Console.WriteLine($"AD: Moved user from '{currentParentDn}' to '{targetOuDn}'");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"AD: User already in department OU '{targetOuDn}'");
+                            }
+
+                            // Update department attribute regardless of move
+                            var deptMod = new DirectoryAttributeModification
+                            {
+                                Name = "department",
+                                Operation = DirectoryAttributeOperation.Replace
+                            };
+                            deptMod.Add(command.Department);
+                            modifications.Add(deptMod);
+
+                            Console.WriteLine($"AD: Updated department attribute to '{command.Department}'");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not move user to department OU: {ex.Message}");
+
+                            // Still update department attribute even if move fails
+                            var deptMod = new DirectoryAttributeModification
+                            {
+                                Name = "department",
+                                Operation = DirectoryAttributeOperation.Replace
+                            };
+                            deptMod.Add(command.Department);
+                            modifications.Add(deptMod);
+                        }
                     }
                     else
                     {
@@ -1585,8 +1704,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             if (!string.Equals(currentParentDn, targetOuDn, StringComparison.OrdinalIgnoreCase))
                             {
                                 MoveUserToOu(connection, userDn, targetOuDn);
-
-                                // After move, DN changes: recompute
                                 var uid = ExtractUidFromDn(userDn);
                                 newUserDn = $"uid={uid},{targetOuDn}";
 
@@ -1748,6 +1865,110 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 }
             });
         }
+        // Helper method to get RDN from DN
+        private static string GetRdnFromDn(string dn)
+        {
+            if (string.IsNullOrEmpty(dn))
+                return string.Empty;
+
+            var parts = dn.Split(',', 2);
+            return parts.Length > 0 ? parts[0] : dn;
+        }
+
+        // Helper method to find department OU for moving users
+        private string GetDepartmentOuDnForMove(LdapConnection connection, string department)
+        {
+            if (string.IsNullOrWhiteSpace(department))
+                throw new ArgumentException("Department name cannot be empty");
+
+            Console.WriteLine($"Looking for department OU for move: '{department}'");
+
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                // AD: Try different possible OU structures
+                var possiblePaths = new[]
+                {
+            $"OU={Escape(department)},OU=Employees,{_ldapSettings.BaseDn}",
+            $"OU={Escape(department)},{_ldapSettings.BaseDn}",
+            $"CN={Escape(department)},OU=Employees,{_ldapSettings.BaseDn}",
+            $"CN={Escape(department)},{_ldapSettings.BaseDn}"
+            };
+
+                foreach (var path in possiblePaths)
+                {
+                    try
+                    {
+                        if (DepartmentOuExists(connection, path))
+                        {
+                            Console.WriteLine($"Found department OU for move at: {path}");
+                            return path;
+                        }
+                    }
+                    catch
+                    {
+                        // Try next path
+                        continue;
+                    }
+                }
+
+                throw new InvalidOperationException(
+                    $"Department OU '{department}' not found for move. " +
+                    $"Tried locations: {string.Join(", ", possiblePaths)}");
+            }
+            else
+            {
+                // OpenLDAP: Use existing method
+                return GetDepartmentOuDnAsync(connection, department);
+            }
+        }
+
+        // Improved MoveUserToOu method
+        private void ADMoveUserToOu(LdapConnection connection, string userDn, string targetOuDn)
+        {
+            var currentParentDn = GetParentOuDn(userDn);
+
+            // If already in target OU → do nothing
+            if (string.Equals(currentParentDn, targetOuDn, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"User already in target OU: {targetOuDn}");
+                return;
+            }
+
+            // Extract RDN
+            var rdn = GetRdnFromDn(userDn);
+
+            Console.WriteLine($"Moving user: RDN={rdn}, From={currentParentDn}, To={targetOuDn}");
+
+            try
+            {
+                var request = new ModifyDNRequest(userDn, targetOuDn, rdn)
+                {
+                    DeleteOldRdn = true
+                };
+
+                connection.SendRequest(request);
+                Console.WriteLine($"Successfully moved user to {targetOuDn}");
+            }
+            catch (DirectoryOperationException ex)
+            {
+                Console.WriteLine($"Move failed: {ex.Message} (Error code: {ex.Response?.ResultCode})");
+
+                // Check for common errors
+                if (ex.Response?.ErrorMessage?.Contains("object class violation") == true)
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot move user to '{targetOuDn}'. " +
+                        $"The target OU might have restrictions or the user object class is not allowed there.");
+                }
+
+                throw new InvalidOperationException($"Failed to move user: {ex.Message}", ex);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unexpected error during move: {ex.Message}");
+                throw new InvalidOperationException($"Failed to move user: {ex.Message}", ex);
+            }
+        }
 
         private bool IsWithinAllowedParent(string dn)
         {
@@ -1808,12 +2029,17 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 return null;
             }
         }
-        private static string GetParentOuDn(string userDn)
+        private static string GetParentOuDn(string dn)
         {
-            var index = userDn.IndexOf(",");
-            if (index == -1) throw new InvalidOperationException("Invalid DN format.");
+            if (string.IsNullOrEmpty(dn))
+                throw new InvalidOperationException("Invalid DN: cannot be null or empty");
 
-            return userDn.Substring(index + 1);
+            var parts = dn.Split(',');
+            if (parts.Length < 2)
+                throw new InvalidOperationException($"Invalid DN format: {dn}");
+
+            // Rejoin everything except the first part (RDN)
+            return string.Join(",", parts, 1, parts.Length - 1);
         }
         private void MoveUserToOu(LdapConnection connection, string userDn, string targetOuDn)
         {

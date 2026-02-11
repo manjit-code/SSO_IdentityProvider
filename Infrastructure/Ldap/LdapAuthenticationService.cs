@@ -16,6 +16,56 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             _ldapInfraSettings = opt.Value;
         }
 
+        // Universal bind method for both OpenLDAP and AD
+        private LdapConnection BindToLdap(string host, int port, bool useSsl, string bindDn, string password)
+        {
+            var identifier = new LdapDirectoryIdentifier(host, port, useSsl, false);
+            var connection = new LdapConnection(identifier)
+            {
+                AuthType = AuthType.Basic,
+                Credential = new NetworkCredential(bindDn, password)
+            };
+
+            // Set protocol version based on LDAP type
+            connection.SessionOptions.ProtocolVersion = 3; // Both OpenLDAP and AD support LDAPv3
+
+            if (useSsl)
+            {
+                connection.SessionOptions.SecureSocketLayer = true;
+                // For AD with self-signed certificates, you might need to accept all
+                connection.SessionOptions.VerifyServerCertificate = (conn, cert) => true;
+            }
+
+            try
+            {
+                connection.Bind();
+                return connection;
+            }
+            catch (LdapException ex)
+            {
+                Console.WriteLine($"LDAP Bind failed for {bindDn}: {ex.Message} (Error: {ex.ErrorCode})");
+
+                // AD-specific error handling
+                if (_ldapSettings.LdapType == LdapType.ActiveDirectory)
+                {
+                    Console.WriteLine($"AD Connection Details: Host={host}, Port={port}, UseSsl={useSsl}");
+                    Console.WriteLine($"Service Account: {bindDn}");
+
+                    // Common AD errors
+                    if (ex.ErrorCode == 81) // Server unreachable
+                    {
+                        throw new Exception($"AD server unreachable at {host}:{port}. Check network/firewall.");
+                    }
+                    else if (ex.ErrorCode == 49) // Invalid credentials
+                    {
+                        throw new Exception($"Invalid AD service account credentials for {bindDn}");
+                    }
+                }
+
+                throw;
+            }
+        }
+
         // Helper method to bind to OpenLDAP
         private LdapConnection BindToOpenLdap(string host, int port, bool useSsl, string bindDn, string password)
         {
@@ -44,7 +94,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         }
         public LdapConnection BindAsServiceAccount()
         {
-            return BindToOpenLdap(
+            return BindToLdap(
                 _ldapSettings.Host,
                 _ldapSettings.Port,
                 _ldapSettings.UseSsl,
@@ -156,7 +206,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
         public LdapConnection BindAsInfraServiceAccountForWrite()
         {
-            return BindToOpenLdap(
+            return BindToLdap(
                 _ldapInfraSettings.Host,
                 _ldapInfraSettings.Port,
                 _ldapInfraSettings.UseSsl,

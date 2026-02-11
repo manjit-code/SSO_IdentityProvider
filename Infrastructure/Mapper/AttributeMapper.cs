@@ -105,10 +105,53 @@ namespace SSO_IdentityProvider.Infrastructure.Mapper
         public string GetUserRdn(string username)
         {
             return IsActiveDirectory
-                ? $"CN={username}"
-                : $"uid={username}";
+                ? $"CN={EscapeDnValue(username)}"
+                : $"uid={EscapeDnValue(username)}";
         }
 
+        private static string EscapeDnValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+
+            // Escape characters that need escaping in DN values
+            var sb = new StringBuilder();
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case ',':
+                        sb.Append("\\,");
+                        break;
+                    case '\\':
+                        sb.Append("\\\\");
+                        break;
+                    case '#':
+                        sb.Append("\\#");
+                        break;
+                    case '+':
+                        sb.Append("\\+");
+                        break;
+                    case '"':
+                        sb.Append("\\\"");
+                        break;
+                    case '<':
+                        sb.Append("\\<");
+                        break;
+                    case '>':
+                        sb.Append("\\>");
+                        break;
+                    case ';':
+                        sb.Append("\\;");
+                        break;
+                    default:
+                        sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+
+        }
+        
         // Helper for AD account control values
         public string GetAdAccountControlValue(bool enabled)
         {
