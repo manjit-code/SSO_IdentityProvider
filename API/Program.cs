@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using SSO_IdentityProvider.API.Swagger;
 using SSO_IdentityProvider.Application.Services;
 using SSO_IdentityProvider.Domain.Interfaces;
 using SSO_IdentityProvider.Domain.Interfaces.OAuth;
@@ -29,6 +30,7 @@ builder.Services.AddSwaggerGen(options =>
         Version = "v1"
     });
 
+    options.SchemaFilter<SearchUsersRequestFilter>();
     // Swagger JWT support
     options.AddSecurityDefinition("Bearer", new()
     {

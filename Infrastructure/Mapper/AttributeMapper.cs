@@ -37,6 +37,11 @@ namespace SSO_IdentityProvider.Infrastructure.Mapper
                     "AccountStatus" => "userAccountControl",
                     "ObjectClassUser" => "user",
                     "ObjectClassOu" => "organizationalUnit",
+                    "StreetAddress" => "streetAddress",
+                    "City" => "l",
+                    "State" => "st",
+                    "PostalCode" => "postalCode",
+                    "Country" => "c",
                     _ => genericAttribute
                 };
             }
@@ -58,6 +63,11 @@ namespace SSO_IdentityProvider.Infrastructure.Mapper
                     "AccountStatus" => _settings.AttributeMappings.AccountStatusAttribute,
                     "ObjectClassUser" => _settings.AttributeMappings.ObjectClassUser,
                     "ObjectClassOu" => _settings.AttributeMappings.ObjectClassOu,
+                    "StreetAddress" => "streetAddress",
+                    "City" => "l",
+                    "State" => "st",
+                    "PostalCode" => "postalCode",
+                    "Country" => "c",
                     _ => genericAttribute
                 };
             }

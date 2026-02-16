@@ -336,14 +336,52 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         if (string.IsNullOrWhiteSpace(rawValue)) continue;
 
                         var attrLower = attribute.ToLowerInvariant();
-                        // Handle department/status specially for OpenLDAP
-                        if (_attributeMapper.IsOpenLdap &&
-                            (attrLower == "department" || attrLower == "status" || attrLower == "accountstatus"))
+
+                        // Handle ManagerEmail specially - need to search by manager's DN
+                        if (attrLower == "manageremail")
                         {
-                            // These use the description attribute for OpenLDAP
+                            // First, find the manager's DN by email
+                            string? managerDn = FindUserDnByEmail(connection, rawValue);
+                            if (!string.IsNullOrEmpty(managerDn))
+                            {
+                                // Escape the DN for LDAP filter
+                                var escapedDn = Escape(managerDn);
+                                filterParts.Add($"(manager={escapedDn})");
+                            }
+                            else
+                            {
+                                // If manager not found, add a filter that will return no results
+                                filterParts.Add("(manager=non-existent-manager)");
+                            }
+                            continue;
+                        }
+
+                        // Handle department/status specially for OpenLDAP
+                        if (_attributeMapper.IsOpenLdap && (attrLower == "department" || attrLower == "status" || attrLower == "accountstatus"))
+                        {
                             var formattedVal = _attributeMapper.FormatSearchValue(attribute, rawValue);
                             var escapedVal = Escape(formattedVal);
-                            filterParts.Add($"(description={escapedVal})");
+
+                            // For status, use wildcard search in description
+                            if (attrLower == "status" || attrLower == "accountstatus")
+                            {
+                                filterParts.Add($"(description=*{escapedVal}*)");
+                            }
+                            else // department
+                            {
+                                filterParts.Add($"(description=*Department: {escapedVal}*)");
+                            }
+                            continue;
+                        }
+
+                        // Handle address fields for OpenLDAP
+                        if (_attributeMapper.IsOpenLdap &&
+                            (attrLower == "city" || attrLower == "state" || attrLower == "postalcode" ||
+                             attrLower == "country" || attrLower == "streetaddress"))
+                        {
+                            var ldapAttributez = _attributeMapper.MapAttribute(attribute);
+                            var escapedValuez = Escape(rawValue);
+                            filterParts.Add($"({ldapAttributez}={escapedValuez})");
                             continue;
                         }
 
@@ -402,18 +440,28 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         var attrLower = attr.ToLowerInvariant();
 
                         // For OpenLDAP, include description if department or status is requested
-                        if (_attributeMapper.IsOpenLdap &&
-                            (attrLower == "department" || attrLower == "status" || attrLower == "accountstatus"))
+                        if (_attributeMapper.IsOpenLdap)
                         {
                             requestedAttributes.Add("description");
                         }
-                        else if (attrLower == "department" && _attributeMapper.IsActiveDirectory)
+
+                        if (attrLower == "distinguishedname")
                         {
-                            requestedAttributes.Add(_attributeMapper.MapAttribute("Department"));
+                            continue;
                         }
-                        else if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsActiveDirectory)
+                        else if (attrLower == "department" && _attributeMapper.IsOpenLdap)
                         {
-                            requestedAttributes.Add(_attributeMapper.MapAttribute("AccountStatus"));
+                            requestedAttributes.Add("description");
+                        }
+                        else if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsOpenLdap)
+                        {
+                            requestedAttributes.Add("description");
+                        }
+                        else if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" || attrLower == "postalcode" || attrLower == "country")
+                        {
+                            // Add address attributes directly
+                            var ldapAttr = _attributeMapper.MapAttribute(attr);
+                            requestedAttributes.Add(ldapAttr);
                         }
                         else
                         {
@@ -467,6 +515,13 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         {
                             var attrLower = attr.ToLowerInvariant();
 
+                            // Handle DistinguishedName specially
+                            if (attrLower == "distinguishedname")
+                            {
+                                result.Attributes[attr] = entry.DistinguishedName;
+                                continue;
+                            }
+
                             // Special handling for department in OpenLDAP
                             if (attrLower == "department" && _attributeMapper.IsOpenLdap)
                             {
@@ -491,11 +546,30 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                     var description = entry.Attributes["description"][0]?.ToString();
                                     var status = ExtractValueFromDescription(description, "Account Status")
                                               ?? ExtractValueFromDescription(description, "Status");
-                                    result.Attributes[attr] = status ?? "Unknown";
+
+                                    // Default to "Active" if no status found
+                                    result.Attributes[attr] = !string.IsNullOrEmpty(status) ? status : "Active";
                                 }
                                 else
                                 {
-                                    result.Attributes[attr] = "Unknown";
+                                    result.Attributes[attr] = "Active";
+                                }
+                                continue;
+                            }
+
+                            // Handle address attributes
+                            if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" ||
+                                attrLower == "postalcode" || attrLower == "country")
+                            {
+                                var ldapAttribute = _attributeMapper.MapAttribute(attr);
+                                if (entry.Attributes.Contains(ldapAttribute))
+                                {
+                                    var value = entry.Attributes[ldapAttribute][0]?.ToString();
+                                    result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Not provided";
                                 }
                                 continue;
                             }
@@ -506,7 +580,8 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                 var deptAttr = _attributeMapper.MapAttribute("Department");
                                 if (entry.Attributes.Contains(deptAttr))
                                 {
-                                    result.Attributes[attr] = entry.Attributes[deptAttr][0]?.ToString() ?? "Unavailable";
+                                    var value = entry.Attributes[deptAttr][0]?.ToString();
+                                    result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
                                 }
                                 else
                                 {
@@ -529,12 +604,12 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                     }
                                     else
                                     {
-                                        result.Attributes[attr] = "Unknown";
+                                        result.Attributes[attr] = "Active";
                                     }
                                 }
                                 else
                                 {
-                                    result.Attributes[attr] = "Unknown";
+                                    result.Attributes[attr] = "Active";
                                 }
                                 continue;
                             }
@@ -585,12 +660,98 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         {
                             var result = new DirectorySearchResult
                             {
-                                DistinguishedName = entry.DistinguishedName,
-                                Username = ExtractUsernameFromDn(entry.DistinguishedName)
+                                DistinguishedName = entry.DistinguishedName
                             };
 
-                            // Process attributes similarly...
-                            // (Add similar attribute processing logic here)
+                            // Get username
+                            var usernameAttr = _attributeMapper.GetUsernameSearchAttribute();
+                            if (entry.Attributes.Contains(usernameAttr))
+                            {
+                                result.Username = entry.Attributes[usernameAttr][0]?.ToString() ?? "Unavailable";
+                            }
+                            else
+                            {
+                                result.Username = ExtractUsernameFromDn(entry.DistinguishedName);
+                            }
+
+                            // Process attributes using the same logic as main search
+                            var attributesToProcess = reqBody.Attributes?.Any() == true
+                                ? reqBody.Attributes
+                                : new List<string> { "Username", "DisplayName", "Email" };
+
+                            foreach (var attr in attributesToProcess)
+                            {
+                                var attrLower = attr.ToLowerInvariant();
+
+                                // Handle DistinguishedName
+                                if (attrLower == "distinguishedname")
+                                {
+                                    result.Attributes[attr] = entry.DistinguishedName;
+                                    continue;
+                                }
+
+                                // Handle department in OpenLDAP
+                                if (attrLower == "department" && _attributeMapper.IsOpenLdap)
+                                {
+                                    if (entry.Attributes.Contains("description"))
+                                    {
+                                        var description = entry.Attributes["description"][0]?.ToString();
+                                        var dept = ExtractValueFromDescription(description, "Department");
+                                        result.Attributes[attr] = dept ?? "Unavailable";
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Unavailable";
+                                    }
+                                    continue;
+                                }
+
+                                // Handle status in OpenLDAP
+                                if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsOpenLdap)
+                                {
+                                    if (entry.Attributes.Contains("description"))
+                                    {
+                                        var description = entry.Attributes["description"][0]?.ToString();
+                                        var status = ExtractValueFromDescription(description, "Account Status")
+                                                  ?? ExtractValueFromDescription(description, "Status");
+                                        result.Attributes[attr] = !string.IsNullOrEmpty(status) ? status : "Active";
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Active";
+                                    }
+                                    continue;
+                                }
+
+                                // Handle address attributes
+                                if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" ||
+                                    attrLower == "postalcode" || attrLower == "country")
+                                {
+                                    var ldapAttr = _attributeMapper.MapAttribute(attr);
+                                    if (entry.Attributes.Contains(ldapAttr))
+                                    {
+                                        var value = entry.Attributes[ldapAttr][0]?.ToString();
+                                        result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Not provided";
+                                    }
+                                    continue;
+                                }
+
+                                // Default handling for other attributes
+                                var ldapAttrGeneric = _attributeMapper.MapAttribute(attr);
+                                if (entry.Attributes.Contains(ldapAttrGeneric))
+                                {
+                                    var value = entry.Attributes[ldapAttrGeneric][0]?.ToString();
+                                    result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+                                }
+                                else
+                                {
+                                    result.Attributes[attr] = "Unavailable";
+                                }
+                            }
 
                             results.Add(result);
                         }

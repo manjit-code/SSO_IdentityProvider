@@ -9,6 +9,7 @@ using SSO_IdentityProvider.Infrastructure.Configuration;
 using System;
 using System.DirectoryServices.Protocols;
 using System.Security.Claims;
+using System.Linq;
 
 namespace SSO_IdentityProvider.API.Controllers
 {
@@ -66,18 +67,22 @@ namespace SSO_IdentityProvider.API.Controllers
         {
             try
             {
+                // Convert user-friendly search filters to dictionary format
+                var filters = ConvertSearchFiltersToDictionary(request.SearchFilters, request.Filters);
+
+                // Convert user-friendly attribute selector to list format
+                var attributes = ConvertAttributesToList(request.Attributes, request.IncludeAttributes);
+
                 // Prepare search criteria
                 var criteria = new UserSearchCriteria
                 {
-                    BaseDn = _ldapSettings.BaseDn, // Use configured base DN
-                    Filters = request.Filters ?? new Dictionary<string, string>(),
-                    Attributes = request.IncludeAttributes ?? new List<string>
+                    BaseDn = _ldapSettings.BaseDn, 
+                    Filters = filters ?? new Dictionary<string, string>(),
+                    Attributes = attributes ?? new List<string>
                     {
                         "Username",
                         "DisplayName",
-                        "Email",
-                        "Department",
-                        "Status"
+                        "Email"
                     },
                     Scope = SearchScope.Subtree,
                     MaxResults = Math.Clamp(request.MaxResults, 1, 1000)
@@ -98,6 +103,99 @@ namespace SSO_IdentityProvider.API.Controllers
                 return StatusCode(500, new { Error = "Search failed", Message = ex.Message });
             }
         }
+
+        private Dictionary<string, string>? ConvertSearchFiltersToDictionary(UserSearchFilters? searchFilters, Dictionary<string, string>? existingFilters)
+        {
+            // If no search filters provided, return existing filters (could be null)
+            if (searchFilters == null)
+                return existingFilters;
+
+            var result = new Dictionary<string, string>();
+
+            // Copy existing filters if any (for backward compatibility)
+            if (existingFilters != null)
+            {
+                foreach (var kvp in existingFilters)
+                {
+                    result[kvp.Key] = kvp.Value;
+                }
+            }
+
+            // Map user-friendly filters to the attribute names expected by the mapper
+            AddFilterIfNotNull(result, "Username", searchFilters.Username);
+            AddFilterIfNotNull(result, "DisplayName", searchFilters.DisplayName);
+            AddFilterIfNotNull(result, "Email", searchFilters.Email);
+            if (!string.IsNullOrWhiteSpace(searchFilters.Department))
+            {
+                result["Department"] = searchFilters.Department;
+            }
+            AddFilterIfNotNull(result, "Title", searchFilters.Title);
+            AddFilterIfNotNull(result, "ManagerEmail", searchFilters.ManagerEmail);
+            AddFilterIfNotNull(result, "AccountStatus", searchFilters.AccountStatus);
+            AddFilterIfNotNull(result, "Phone", searchFilters.Phone);
+            AddFilterIfNotNull(result, "City", searchFilters.City);
+            AddFilterIfNotNull(result, "State", searchFilters.State);
+            AddFilterIfNotNull(result, "PostalCode", searchFilters.PostalCode);
+            AddFilterIfNotNull(result, "Country", searchFilters.Country);
+
+            return result;
+        }
+        private List<string>? ConvertAttributesToList(UserAttributesRequest? attributes, List<string>? existingAttributes)
+        {
+            // If no attributes selector provided, return existing attributes (could be null)
+            if (attributes == null)
+                return existingAttributes;
+
+            var result = new List<string>();
+
+            // If IncludeAll is true, add all available attributes
+            if (attributes.IncludeAll)
+            {
+                result.AddRange(new[]
+                {
+            "Username", "DistinguishedName", "DisplayName", "Email",
+            "Department", "Title", "Phone", "Manager", "AccountStatus",
+            "Groups", "Description", "StreetAddress", "City", "State",
+            "PostalCode", "Country"
+        });
+                return result;
+            }
+
+            // Add individual attributes based on boolean flags
+            if (attributes.IncludeUsername) result.Add("Username");
+            if (attributes.IncludeDistinguishedName) result.Add("DistinguishedName");
+            if (attributes.IncludeDisplayName) result.Add("DisplayName");
+            if (attributes.IncludeEmail) result.Add("Email");
+            if (attributes.IncludeDepartment) result.Add("Department");
+            if (attributes.IncludeTitle) result.Add("Title");
+            if (attributes.IncludePhone) result.Add("Phone");
+            if (attributes.IncludeManager) result.Add("Manager");
+            if (attributes.IncludeAccountStatus) result.Add("AccountStatus");
+            if (attributes.IncludeGroups) result.Add("Groups");
+            if (attributes.IncludeDescription) result.Add("Description");
+
+            // Handle address attributes as a group
+            if (attributes.IncludeAddress)
+            {
+                result.AddRange(new[] { "StreetAddress", "City", "State", "PostalCode", "Country" });
+            }
+
+            // If no attributes selected, return defaults
+            if (result.Count == 0)
+            {
+                result.AddRange(new[] { "Username", "DisplayName", "Email" });
+            }
+
+            return result;
+        }
+        private void AddFilterIfNotNull(Dictionary<string, string> filters, string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                filters[key] = value;
+            }
+        }
+
 
         [HttpPatch("update-my-profile")]
         [Authorize]
