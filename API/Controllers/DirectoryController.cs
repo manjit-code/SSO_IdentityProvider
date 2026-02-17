@@ -153,11 +153,11 @@ namespace SSO_IdentityProvider.API.Controllers
             {
                 result.AddRange(new[]
                 {
-            "Username", "DistinguishedName", "DisplayName", "Email",
-            "Department", "Title", "Phone", "Manager", "AccountStatus",
-            "Groups", "Description", "StreetAddress", "City", "State",
-            "PostalCode", "Country"
-        });
+                    "Username", "DistinguishedName", "DisplayName", "Email",
+                    "Department", "Title", "Phone", "Manager", "AccountStatus",
+                    "Groups", "StreetAddress", "City", "State",
+                    "PostalCode", "Country"
+                });
                 return result;
             }
 
@@ -172,7 +172,6 @@ namespace SSO_IdentityProvider.API.Controllers
             if (attributes.IncludeManager) result.Add("Manager");
             if (attributes.IncludeAccountStatus) result.Add("AccountStatus");
             if (attributes.IncludeGroups) result.Add("Groups");
-            if (attributes.IncludeDescription) result.Add("Description");
 
             // Handle address attributes as a group
             if (attributes.IncludeAddress)
@@ -212,6 +211,7 @@ namespace SSO_IdentityProvider.API.Controllers
                 City = request.City,
                 State = request.State,
                 PostalCode = request.PostalCode,
+                Country = request.Country,
                 NewPassword = request.NewPassword
             };
 

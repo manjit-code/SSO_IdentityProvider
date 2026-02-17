@@ -279,10 +279,10 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             // Simple OU name, try different formats
                             var possibleOus = new[]
                             {
-                        $"ou={Escape(ouValue)},{_ldapSettings.BaseDn}",
-                        $"ou={Escape(ouValue)},ou=Employees,{_ldapSettings.BaseDn}",
-                        $"ou={Escape(ouValue)},ou=Departments,{_ldapSettings.BaseDn}"
-                    };
+                                $"ou={Escape(ouValue)},{_ldapSettings.BaseDn}",
+                                $"ou={Escape(ouValue)},ou=Employees,{_ldapSettings.BaseDn}",
+                                $"ou={Escape(ouValue)},ou=Departments,{_ldapSettings.BaseDn}"
+                            };
 
                             // Find which OU actually exists
                             foreach (var possibleOu in possibleOus)
@@ -305,7 +305,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                 }
                                 catch
                                 {
-                                    // Try next possible location
                                     continue;
                                 }
                             }
@@ -374,14 +373,16 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             continue;
                         }
 
-                        // Handle address fields for OpenLDAP
-                        if (_attributeMapper.IsOpenLdap &&
-                            (attrLower == "city" || attrLower == "state" || attrLower == "postalcode" ||
-                             attrLower == "country" || attrLower == "streetaddress"))
+                        // Handle address fields for both AD and OpenLDAP
+                        if (attrLower == "city" || attrLower == "state" || attrLower == "postalcode" || attrLower == "country" || attrLower == "streetaddress")
                         {
-                            var ldapAttributez = _attributeMapper.MapAttribute(attribute);
-                            var escapedValuez = Escape(rawValue);
-                            filterParts.Add($"({ldapAttributez}={escapedValuez})");
+                            // Capitalize the first letter for the description format
+                            string fieldName = char.ToUpper(attrLower[0]) + attrLower.Substring(1);
+                            if (fieldName == "Postalcode") fieldName = "PostalCode";
+                            if (fieldName == "Streetaddress") fieldName = "Street";
+
+                            filterParts.Add($"(description=*{fieldName}: {Escape(rawValue)}*)");
+                            Console.WriteLine($"Added description filter: {fieldName}: {rawValue}");
                             continue;
                         }
 
@@ -439,29 +440,17 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     {
                         var attrLower = attr.ToLowerInvariant();
 
-                        // For OpenLDAP, include description if department or status is requested
-                        if (_attributeMapper.IsOpenLdap)
-                        {
-                            requestedAttributes.Add("description");
-                        }
-
-                        if (attrLower == "distinguishedname")
+                        if (attrLower == "distinguishedname" || attrLower == "description")
                         {
                             continue;
                         }
-                        else if (attrLower == "department" && _attributeMapper.IsOpenLdap)
-                        {
-                            requestedAttributes.Add("description");
-                        }
-                        else if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsOpenLdap)
-                        {
-                            requestedAttributes.Add("description");
-                        }
                         else if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" || attrLower == "postalcode" || attrLower == "country")
                         {
-                            // Add address attributes directly
-                            var ldapAttr = _attributeMapper.MapAttribute(attr);
-                            requestedAttributes.Add(ldapAttr);
+                            if (!_attributeMapper.IsOpenLdap)
+                            {
+                                var ldapAttr = _attributeMapper.MapAttribute(attr);
+                                requestedAttributes.Add(ldapAttr);
+                            }
                         }
                         else
                         {
@@ -469,6 +458,12 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             requestedAttributes.Add(ldapAttr);
                         }
                     }
+                }
+
+                // include description for OpenLdap to extract data, will not be in response
+                if (_attributeMapper.IsOpenLdap && !requestedAttributes.Contains("description"))
+                {
+                    requestedAttributes.Add("description");
                 }
 
                 // LDAP search request
@@ -561,31 +556,55 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" ||
                                 attrLower == "postalcode" || attrLower == "country")
                             {
-                                var ldapAttribute = _attributeMapper.MapAttribute(attr);
-                                if (entry.Attributes.Contains(ldapAttribute))
+                                if (_attributeMapper.IsOpenLdap)
                                 {
-                                    var value = entry.Attributes[ldapAttribute][0]?.ToString();
-                                    result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
-                                }
-                                else
-                                {
-                                    result.Attributes[attr] = "Not provided";
-                                }
-                                continue;
-                            }
+                                    // For OpenLDAP, get from description
+                                    if (entry.Attributes.Contains("description"))
+                                    {
+                                        var description = entry.Attributes["description"][0]?.ToString();
+                                        var descriptionAttrs = ParseDescriptionAttributes(description);
 
-                            // Special handling for department in AD
-                            if (attrLower == "department" && _attributeMapper.IsActiveDirectory)
-                            {
-                                var deptAttr = _attributeMapper.MapAttribute("Department");
-                                if (entry.Attributes.Contains(deptAttr))
-                                {
-                                    var value = entry.Attributes[deptAttr][0]?.ToString();
-                                    result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+                                        string fieldKey = attrLower switch
+                                        {
+                                            "streetaddress" => "Street",
+                                            "city" => "City",
+                                            "state" => "State",
+                                            "postalcode" => "PostalCode",
+                                            "country" => "Country",
+                                            _ => attr
+                                        };
+
+                                        Console.WriteLine($"Looking for {fieldKey} in description: {description}");
+
+                                        if (descriptionAttrs.TryGetValue(fieldKey, out var value))
+                                        {
+                                            result.Attributes[attr] = value;
+                                            Console.WriteLine($"Found {fieldKey}: {value}");
+                                        }
+                                        else
+                                        {
+                                            result.Attributes[attr] = "Not provided";
+                                            Console.WriteLine($"Did not find {fieldKey} in description");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Not provided";
+                                    }
                                 }
                                 else
                                 {
-                                    result.Attributes[attr] = "Unavailable";
+                                    // For AD, use direct attributes
+                                    string ldapAttribute = _attributeMapper.MapAttribute(attr);
+                                    if (entry.Attributes.Contains(ldapAttribute))
+                                    {
+                                        var value = entry.Attributes[ldapAttribute][0]?.ToString();
+                                        result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
+                                    }
+                                    else
+                                    {
+                                        result.Attributes[attr] = "Not provided";
+                                    }
                                 }
                                 continue;
                             }
@@ -683,14 +702,12 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                             {
                                 var attrLower = attr.ToLowerInvariant();
 
-                                // Handle DistinguishedName
                                 if (attrLower == "distinguishedname")
                                 {
                                     result.Attributes[attr] = entry.DistinguishedName;
                                     continue;
                                 }
 
-                                // Handle department in OpenLDAP
                                 if (attrLower == "department" && _attributeMapper.IsOpenLdap)
                                 {
                                     if (entry.Attributes.Contains("description"))
@@ -706,7 +723,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                     continue;
                                 }
 
-                                // Handle status in OpenLDAP
                                 if ((attrLower == "status" || attrLower == "accountstatus") && _attributeMapper.IsOpenLdap)
                                 {
                                     if (entry.Attributes.Contains("description"))
@@ -723,23 +739,57 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                                     continue;
                                 }
 
-                                // Handle address attributes
+                                // Handle address attributes - extract from description for OpenLDAP
                                 if (attrLower == "streetaddress" || attrLower == "city" || attrLower == "state" ||
                                     attrLower == "postalcode" || attrLower == "country")
                                 {
-                                    var ldapAttr = _attributeMapper.MapAttribute(attr);
-                                    if (entry.Attributes.Contains(ldapAttr))
+                                    if (_attributeMapper.IsOpenLdap)
                                     {
-                                        var value = entry.Attributes[ldapAttr][0]?.ToString();
-                                        result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
+                                        // For OpenLDAP, get from description
+                                        if (entry.Attributes.Contains("description"))
+                                        {
+                                            var description = entry.Attributes["description"][0]?.ToString();
+                                            var descriptionAttrs = ParseDescriptionAttributes(description);
+
+                                            string fieldKey = attrLower switch
+                                            {
+                                                "streetaddress" => "Street",
+                                                "city" => "City",
+                                                "state" => "State",
+                                                "postalcode" => "PostalCode",
+                                                "country" => "Country",
+                                                _ => attr
+                                            };
+
+                                            if (descriptionAttrs.TryGetValue(fieldKey, out var value))
+                                            {
+                                                result.Attributes[attr] = value;
+                                            }
+                                            else
+                                            {
+                                                result.Attributes[attr] = "Not provided";
+                                            }
+                                        }
+                                        else
+                                        {
+                                            result.Attributes[attr] = "Not provided";
+                                        }
                                     }
                                     else
                                     {
-                                        result.Attributes[attr] = "Not provided";
+                                        string ldapAttribute = _attributeMapper.MapAttribute(attr);
+                                        if (entry.Attributes.Contains(ldapAttribute))
+                                        {
+                                            var value = entry.Attributes[ldapAttribute][0]?.ToString();
+                                            result.Attributes[attr] = string.IsNullOrWhiteSpace(value) ? "Not provided" : value;
+                                        }
+                                        else
+                                        {
+                                            result.Attributes[attr] = "Not provided";
+                                        }
                                     }
                                     continue;
                                 }
-
                                 // Default handling for other attributes
                                 var ldapAttrGeneric = _attributeMapper.MapAttribute(attr);
                                 if (entry.Attributes.Contains(ldapAttrGeneric))
@@ -764,7 +814,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             });
         }
 
-        // Helper method to extract username from DN if specific attributes are missing
         private string ExtractUsernameFromDn(string dn)
         {
             if (string.IsNullOrEmpty(dn)) return "Unavailable";
@@ -789,7 +838,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             return dn;
         }
 
-        // Helper method to extract value from description field
         private string? ExtractValueFromDescription(string? description, string key)
         {
             if (string.IsNullOrWhiteSpace(description)) return null;
@@ -806,8 +854,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
             return null;
         }
-
-        // Helper method to escape wildcards properly
         private string EscapeWildcard(string value)
         {
             // Simple wildcard handling - just escape the asterisk
@@ -861,57 +907,160 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
                 var modifications = new List<DirectoryAttributeModification>();
-                void ReplaceIfProvided(string attr, string? value)
-                {
-                    if (string.IsNullOrWhiteSpace(value)) return;
 
-                    var mod = new DirectoryAttributeModification
+                // For OpenLDAP, we need to update the description
+                if (_attributeMapper.IsOpenLdap)
+                {
+                    // First, get current description
+                    var searchRequest = new SearchRequest(
+                        userDn,
+                        "(objectClass=inetOrgPerson)",
+                        SearchScope.Base,
+                        "description", "title", "telephoneNumber", "manager"
+                    );
+
+                    var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
+                    var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+
+                    if (entry == null) throw new InvalidOperationException("User not found");
+
+                    // Parse current description
+                    string currentDescription = entry.Attributes.Contains("description")
+                        ? entry.Attributes["description"][0]?.ToString() ?? ""
+                        : "";
+
+                    var descriptionAttrs = ParseDescriptionAttributes(currentDescription);
+
+                    // Update fields from profile
+                    if (!string.IsNullOrWhiteSpace(profile.DisplayName))
                     {
-                        Name = attr,
-                        Operation = DirectoryAttributeOperation.Replace
-                    };
-                    mod.Add(value);
-                    modifications.Add(mod);
-                }
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = "cn",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(profile.DisplayName);
+                        modifications.Add(mod);
+                    }
 
-                // Update display name (cn for OpenLDAP, displayName for AD)
-                if (!string.IsNullOrWhiteSpace(profile.DisplayName))
+                    if (!string.IsNullOrWhiteSpace(profile.TelephoneNumber))
+                    {
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = "telephoneNumber",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(profile.TelephoneNumber);
+                        modifications.Add(mod);
+                    }
+
+                    // Update description attributes
+                    if (!string.IsNullOrWhiteSpace(profile.StreetAddress))
+                        descriptionAttrs["Street"] = profile.StreetAddress;
+
+                    if (!string.IsNullOrWhiteSpace(profile.City))
+                        descriptionAttrs["City"] = profile.City;
+
+                    if (!string.IsNullOrWhiteSpace(profile.State))
+                        descriptionAttrs["State"] = profile.State;
+
+                    if (!string.IsNullOrWhiteSpace(profile.PostalCode))
+                        descriptionAttrs["PostalCode"] = profile.PostalCode;
+
+                    if (!string.IsNullOrWhiteSpace(profile.Country))
+                    {
+                        string countryName = profile.Country.ToUpper() switch
+                        {
+                            "IN" => "India",
+                            "US" => "United States",
+                            "UK" => "United Kingdom",
+                            "CA" => "Canada",
+                            "AU" => "Australia",
+                            "DE" => "Germany",
+                            "FR" => "France",
+                            "JP" => "Japan",
+                            "CN" => "China",
+                            _ => profile.Country
+                        };
+                        descriptionAttrs["Country"] = countryName;
+                    }
+
+                    // Rebuild description
+                    var newDescParts = new List<string>();
+
+                    // Priority fields first
+                    if (descriptionAttrs.TryGetValue("Department", out var dept))
+                        newDescParts.Add($"Department: {dept}");
+
+                    if (descriptionAttrs.TryGetValue("Account Status", out var status))
+                        newDescParts.Add($"Account Status: {status}");
+
+                    // Add all other fields
+                    foreach (var kvp in descriptionAttrs.OrderBy(k => k.Key))
+                    {
+                        if (kvp.Key.Equals("Department", StringComparison.OrdinalIgnoreCase) ||
+                            kvp.Key.Equals("Account Status", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        newDescParts.Add($"{kvp.Key}: {kvp.Value}");
+                    }
+
+                    if (newDescParts.Any())
+                    {
+                        var descMod = new DirectoryAttributeModification
+                        {
+                            Name = "description",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        descMod.Add(string.Join("; ", newDescParts));
+                        modifications.Add(descMod);
+                    }
+                }
+                else
                 {
-                    if (_attributeMapper.IsActiveDirectory)
+                    // AD handling - direct attribute updates
+                    void ReplaceIfProvided(string attr, string? value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value)) return;
+
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = attr,
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(value);
+                        modifications.Add(mod);
+                    }
+
+                    // Update display name
+                    if (!string.IsNullOrWhiteSpace(profile.DisplayName))
                     {
                         ReplaceIfProvided("displayName", profile.DisplayName);
+                    }
 
-                        // rename the CN/RDN (use with caution)
-                        //RenameUserInAD(connection, userDn, profile.DisplayName);
-                    }
-                    else
-                    {
-                        ReplaceIfProvided("cn", profile.DisplayName);
-                    }
+                    // Update other attributes using mapped names
+                    ReplaceIfProvided(_attributeMapper.MapAttribute("Phone"), profile.TelephoneNumber);
+                    ReplaceIfProvided("streetAddress", profile.StreetAddress);
+                    ReplaceIfProvided("l", profile.City);
+                    ReplaceIfProvided("st", profile.State);
+                    ReplaceIfProvided("postalCode", profile.PostalCode);
+                    ReplaceIfProvided("c", profile.Country);
                 }
 
-                // Update other attributes using mapped names
-                ReplaceIfProvided(_attributeMapper.MapAttribute("Phone"), profile.TelephoneNumber);
-                ReplaceIfProvided("streetAddress", profile.StreetAddress);
-                ReplaceIfProvided("l", profile.City);
-                ReplaceIfProvided("st", profile.State);
-                ReplaceIfProvided("postalCode", profile.PostalCode);
-
+                // Apply modifications
                 if (modifications.Any())
                 {
                     var modifyRequest = new ModifyRequest(userDn, modifications.ToArray());
                     connection.SendRequest(modifyRequest);
+                    Console.WriteLine($"Applied {modifications.Count} updates to {userDn}");
                 }
 
+                // Handle password change if requested
                 if (!string.IsNullOrWhiteSpace(profile.NewPassword))
                 {
-                    // Validate password policy
                     ValidatePasswordPolicy(profile.NewPassword);
-
-                    // Change password
                     ChangePassword(connection, userDn, profile.NewPassword);
                 }
-
             });
         }
         private void ChangePassword(LdapConnection connection, string userDn, string newPassword)
@@ -1199,10 +1348,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 {
                     attributes.Add(new DirectoryAttribute("postalCode", newUser.PostalCode));
                 }
-                if (!string.IsNullOrWhiteSpace(newUser.Country))
-                {
-                    attributes.Add(new DirectoryAttribute("c", newUser.Country.ToUpper()));
-                }
+                
             }
 
             try
@@ -1275,6 +1421,17 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 Console.WriteLine($"First attempt failed: {ex.Message}");
                 Console.WriteLine("Error details: " + ex.Response?.ErrorMessage);
 
+                Console.WriteLine("Attributes that failed:");
+                foreach (var attr in attributes)
+                {
+                    try
+                    {
+                        var values = attr.GetValues(typeof(string));
+                        Console.WriteLine($"  {attr.Name}: {string.Join(", ", values.Cast<string>())}");
+                    }
+                    catch { }
+                }
+
                 // For AD, try simpler approach
                 if (_attributeMapper.IsActiveDirectory)
                 {
@@ -1340,10 +1497,295 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
                     var retryRequest = new AddRequest(userDn, minimalAttributes.ToArray());
                     connection.SendRequest(retryRequest);
+                    Console.WriteLine($"Minimal OpenLDAP user created: {username}");
 
+                    // Now try to add all additional attributes including address fields
                     await Task.Delay(100);
-                    UpdateUserAttributes(connection, userDn, newUser, managerDn);
 
+                    var additionalMods = new List<DirectoryAttributeModification>();
+
+                    // Add department in description
+                    if (!string.IsNullOrWhiteSpace(newUser.Department))
+                    {
+                        var descMod = new DirectoryAttributeModification
+                        {
+                            Name = "description",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        descMod.Add($"Department: {newUser.Department}");
+                        additionalMods.Add(descMod);
+                    }
+
+                    // Title
+                    if (!string.IsNullOrWhiteSpace(newUser.Title))
+                    {
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = "title",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(newUser.Title);
+                        additionalMods.Add(mod);
+                    }
+
+                    // Telephone
+                    if (!string.IsNullOrWhiteSpace(newUser.TelephoneNumber))
+                    {
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = "telephoneNumber",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(newUser.TelephoneNumber);
+                        additionalMods.Add(mod);
+                    }
+
+                    // Manager
+                    if (managerDn != null)
+                    {
+                        var mod = new DirectoryAttributeModification
+                        {
+                            Name = "manager",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        mod.Add(managerDn);
+                        additionalMods.Add(mod);
+                    }
+
+                    // ✅ ADDRESS FIELDS - Try to add them one by one
+                    if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
+                    {
+                        try
+                        {
+                            var mod = new DirectoryAttributeModification
+                            {
+                                Name = "streetAddress",
+                                Operation = DirectoryAttributeOperation.Add
+                            };
+                            mod.Add(newUser.StreetAddress);
+                            additionalMods.Add(mod);
+                            Console.WriteLine("Added streetAddress");
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Could not add streetAddress: {exc.Message}");
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(newUser.City))
+                    {
+                        try
+                        {
+                            var mod = new DirectoryAttributeModification
+                            {
+                                Name = "l", // locality
+                                Operation = DirectoryAttributeOperation.Add
+                            };
+                            mod.Add(newUser.City);
+                            additionalMods.Add(mod);
+                            Console.WriteLine("Added city (l)");
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Could not add city: {exc.Message}");
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(newUser.State))
+                    {
+                        try
+                        {
+                            var mod = new DirectoryAttributeModification
+                            {
+                                Name = "st",
+                                Operation = DirectoryAttributeOperation.Add
+                            };
+                            mod.Add(newUser.State);
+                            additionalMods.Add(mod);
+                            Console.WriteLine("Added state (st)");
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Could not add state: {exc.Message}");
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(newUser.PostalCode))
+                    {
+                        try
+                        {
+                            var mod = new DirectoryAttributeModification
+                            {
+                                Name = "postalCode",
+                                Operation = DirectoryAttributeOperation.Add
+                            };
+                            mod.Add(newUser.PostalCode);
+                            additionalMods.Add(mod);
+                            Console.WriteLine("Added postalCode");
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Could not add postalCode: {exc.Message}");
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(newUser.Country))
+                    {
+                        try
+                        {
+                            // First, check if we need to add the country object class
+                            var checkCountryClass = new SearchRequest(
+                                userDn,
+                                "(objectClass=*)",
+                                SearchScope.Base,
+                                "objectClass"
+                            );
+
+                            var checkResponse = (SearchResponse)connection.SendRequest(checkCountryClass);
+                            var entry = checkResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+
+                            bool countryClassAdded = false;
+
+                            if (entry != null)
+                            {
+                                var objectClasses = entry.Attributes["objectClass"]
+                                    .GetValues(typeof(string))
+                                    .Cast<string>()
+                                    .ToList();
+
+                                // Add country object class if not present
+                                if (!objectClasses.Contains("country", StringComparer.OrdinalIgnoreCase) &&
+                                    !objectClasses.Contains("c", StringComparer.OrdinalIgnoreCase))
+                                {
+                                    var addCountryClass = new DirectoryAttributeModification
+                                    {
+                                        Name = "objectClass",
+                                        Operation = DirectoryAttributeOperation.Add
+                                    };
+                                    addCountryClass.Add("country");
+
+                                    // Send as separate modify request
+                                    var classRequest = new ModifyRequest(userDn, addCountryClass);
+                                    connection.SendRequest(classRequest);
+                                    Console.WriteLine("Added country object class");
+                                    countryClassAdded = true;
+
+                                    // Important: Wait for LDAP to process the schema change
+                                    await Task.Delay(500);
+                                }
+                            }
+
+                            // Now add the country attribute in a SEPARATE request
+                            try
+                            {
+                                var countryMod = new DirectoryAttributeModification
+                                {
+                                    Name = "c",
+                                    Operation = DirectoryAttributeOperation.Add
+                                };
+                                countryMod.Add(newUser.Country.ToUpper());
+
+                                var countryRequest = new ModifyRequest(userDn, countryMod);
+                                connection.SendRequest(countryRequest);
+                                Console.WriteLine($"Added country (c): {newUser.Country.ToUpper()}");
+
+                                // Also add to additionalMods for tracking, but we already sent it
+                                var mod = new DirectoryAttributeModification
+                                {
+                                    Name = "c",
+                                    Operation = DirectoryAttributeOperation.Add
+                                };
+                                mod.Add(newUser.Country.ToUpper());
+                                additionalMods.Add(mod); // Just for tracking
+                            }
+                            catch (Exception exc)
+                            {
+                                Console.WriteLine($"Could not add country attribute 'c': {exc.Message}");
+
+                                // If 'c' fails, try 'co' as before
+                                try
+                                {
+                                    var mod = new DirectoryAttributeModification
+                                    {
+                                        Name = "co",
+                                        Operation = DirectoryAttributeOperation.Add
+                                    };
+
+                                    string countryName = newUser.Country.ToUpper() switch
+                                    {
+                                        "IN" => "India",
+                                        "US" => "United States",
+                                        "UK" => "United Kingdom",
+                                        "CA" => "Canada",
+                                        "AU" => "Australia",
+                                        "DE" => "Germany",
+                                        "FR" => "France",
+                                        "JP" => "Japan",
+                                        "CN" => "China",
+                                        _ => newUser.Country
+                                    };
+
+                                    mod.Add(countryName);
+
+                                    // Send 'co' in a separate request too
+                                    var coRequest = new ModifyRequest(userDn, mod);
+                                    connection.SendRequest(coRequest);
+                                    additionalMods.Add(mod);
+                                    Console.WriteLine($"Added country as friendly name (co): {countryName}");
+                                }
+                                catch (Exception exc2)
+                                {
+                                    Console.WriteLine($"Could not add country as friendly name: {exc2.Message}");
+
+                                    // Last resort: Add to description
+                                    try
+                                    {
+                                        var descMod = additionalMods.FirstOrDefault(m => m.Name == "description");
+                                        if (descMod != null)
+                                        {
+                                            var currentDesc = descMod.GetValues(typeof(string))?.FirstOrDefault()?.ToString() ?? "";
+                                            descMod.Clear();
+                                            descMod.Add($"{currentDesc}; Country: {newUser.Country}");
+                                        }
+                                        else
+                                        {
+                                            descMod = new DirectoryAttributeModification
+                                            {
+                                                Name = "description",
+                                                Operation = DirectoryAttributeOperation.Replace
+                                            };
+                                            descMod.Add($"Department: {newUser.Department}; Country: {newUser.Country}");
+                                            additionalMods.Add(descMod);
+                                        }
+                                        Console.WriteLine("Added country to description as fallback");
+                                    }
+                                    catch (Exception exc3)
+                                    {
+                                        Console.WriteLine($"Could not add country anywhere: {exc3.Message}");
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Error in country handling: {exc.Message}");
+                        }
+                    }
+
+                    // Apply all modifications
+                    if (additionalMods.Any())
+                    {
+                        try
+                        {
+                            var modifyRequest = new ModifyRequest(userDn, additionalMods.ToArray());
+                            connection.SendRequest(modifyRequest);
+                            Console.WriteLine($"Added {additionalMods.Count} additional attributes to user");
+                        }
+                        catch (Exception exc)
+                        {
+                            Console.WriteLine($"Warning: Could not add all attributes: {exc.Message}");
+                        }
+                    }
                     return new CreateUserResponse
                     {
                         Username = username,
@@ -1544,17 +1986,13 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             var modifications = new List<DirectoryAttributeModification>();
 
-            if (!string.IsNullOrWhiteSpace(newUser.Department))
-            {
-                var descMod = new DirectoryAttributeModification
-                {
-                    Name = "description",
-                    Operation = DirectoryAttributeOperation.Replace
-                };
-                descMod.Add($"Department: {newUser.Department}");
-                modifications.Add(descMod);
-            }
+            // Build rich description with all available information
+            var descParts = new List<string>();
 
+            if (!string.IsNullOrWhiteSpace(newUser.Department))
+                descParts.Add($"Department: {newUser.Department}");
+
+            descParts.Add("Account Status: Active"); //default
 
             if (!string.IsNullOrWhiteSpace(newUser.Title))
             {
@@ -1589,13 +2027,58 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 modifications.Add(mod);
             }
 
+            // Add ALL address fields to description
+            if (!string.IsNullOrWhiteSpace(newUser.StreetAddress))
+                descParts.Add($"Street: {newUser.StreetAddress}");
+
+            if (!string.IsNullOrWhiteSpace(newUser.City))
+                descParts.Add($"City: {newUser.City}");
+
+            if (!string.IsNullOrWhiteSpace(newUser.State))
+                descParts.Add($"State: {newUser.State}");
+
+            if (!string.IsNullOrWhiteSpace(newUser.PostalCode))
+                descParts.Add($"PostalCode: {newUser.PostalCode}");
+
+            if (!string.IsNullOrWhiteSpace(newUser.Country))
+            {
+                // Convert country code to full name for readability
+                string countryName = newUser.Country.ToUpper() switch
+                {
+                    "IN" => "India",
+                    "US" => "United States",
+                    "UK" => "United Kingdom",
+                    "CA" => "Canada",
+                    "AU" => "Australia",
+                    "DE" => "Germany",
+                    "FR" => "France",
+                    "JP" => "Japan",
+                    "CN" => "China",
+                    _ => newUser.Country
+                };
+                descParts.Add($"Country: {countryName}");
+            }
+
+            // Update description with all parts
+            if (descParts.Any())
+            {
+                var descMod = new DirectoryAttributeModification
+                {
+                    Name = "description",
+                    Operation = DirectoryAttributeOperation.Replace
+                };
+                descMod.Add(string.Join("; ", descParts));
+                modifications.Add(descMod);
+                Console.WriteLine($"Updated description with: {string.Join("; ", descParts)}");
+            }
+
             if (modifications.Count > 0)
             {
                 var modifyRequest = new ModifyRequest(userDn, modifications.ToArray());
                 connection.SendRequest(modifyRequest);
+                Console.WriteLine($"Applied {modifications.Count} attribute updates");
             }
         }
-
         private bool ValidatePasswordPolicy(string password)
         {
             if (password.Length < 8)
@@ -2268,9 +2751,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     {
                         Name = "description",
                         Operation = DirectoryAttributeOperation.Replace
-                        //Operation = command.IsEnabled
-                        //            ? DirectoryAttributeOperation.Delete  // Remove lock
-                        //            : DirectoryAttributeOperation.Replace // Set lock (000001010000Z means locked)
                     };
                     mod.Add(newDescription);
                     try

@@ -25,7 +25,6 @@ namespace SSO_IdentityProvider.API.DTOs
         public bool IncludeManager { get; set; }
         public bool IncludeAccountStatus { get; set; }
         public bool IncludeGroups { get; set; }
-        public bool IncludeDescription { get; set; }
         public bool IncludeAddress { get; set; }
     }
 }
