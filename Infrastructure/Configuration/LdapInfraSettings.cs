@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Infrastructure.Configuration
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Configuration
 {
     public class LdapInfraSettings
     {

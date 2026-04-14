@@ -1,10 +1,10 @@
 ﻿using Microsoft.Extensions.Options;
-using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Infrastructure.Configuration;
+using Esyasoft.Ldap.Gateway.Domain.Interfaces;
+using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
 using System.DirectoryServices.Protocols;
 using System.Net;
 
-namespace SSO_IdentityProvider.Infrastructure.Ldap
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Ldap
 {
     public class LdapAuthenticationService : ILdapAuthenticator
     {

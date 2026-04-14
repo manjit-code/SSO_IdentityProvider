@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Domain.Interfaces
+namespace Esyasoft.Ldap.Gateway.Domain.Interfaces
 {
     public interface ILdapAuthenticator
     {

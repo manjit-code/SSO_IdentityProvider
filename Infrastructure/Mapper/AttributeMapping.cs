@@ -1,11 +1,11 @@
-﻿using SSO_IdentityProvider.Infrastructure.Configuration;
+﻿using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Infrastructure.Mapper
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Mapper
 {
     public class AttributeMapping
     {

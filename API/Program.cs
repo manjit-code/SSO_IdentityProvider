@@ -1,15 +1,13 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using SSO_IdentityProvider.API.Swagger;
-using SSO_IdentityProvider.Application.Services;
-using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Domain.Interfaces.OAuth;
-using SSO_IdentityProvider.Infrastructure.Configuration;
-using SSO_IdentityProvider.Infrastructure.Ldap;
-using SSO_IdentityProvider.Infrastructure.Mapper;
-using SSO_IdentityProvider.Infrastructure.OAuth;
-using SSO_IdentityProvider.Infrastructure.Security;
+using Esyasoft.Ldap.Gateway.API.Swagger;
+using Esyasoft.Ldap.Gateway.Application.Services;
+using Esyasoft.Ldap.Gateway.Domain.Interfaces;
+using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
+using Esyasoft.Ldap.Gateway.Infrastructure.Ldap;
+using Esyasoft.Ldap.Gateway.Infrastructure.Mapper;
+using Esyasoft.Ldap.Gateway.Infrastructure.Security;
 using StackExchange.Redis;
 using System.Security.Claims;
 using System.Text;
@@ -70,12 +68,8 @@ builder.Services.AddScoped<ILdapAuthenticator, LdapAuthenticationService>();
 builder.Services.AddScoped<IUserRepository, LdapUserRepository>();
 builder.Services.AddScoped<ITokenService, JwtTokenService>();
 builder.Services.AddScoped<DirectoryService>();
-
-builder.Services.AddScoped<IClientStore, InMemoryClientStore>();
-builder.Services.AddSingleton<IAuthorizationCodeStore, InMemoryAuthorizationCodeStore>();
-builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
-
-builder.Services.AddScoped<OAuthService>();
+builder.Services.AddScoped<PasswordPolicyValidator>();
+builder.Services.AddScoped<IOtpService, OtpService>();
 
 builder.Services.AddScoped<AttributeMapper>();
 
@@ -122,6 +116,32 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddHttpClient("OidcServer", (serviceProvider, client) =>
+{
+    var config = serviceProvider.GetRequiredService<IConfiguration>();
+    var baseUrl = config["OidcServer:BaseUrl"]
+        ?? throw new InvalidOperationException(
+            "'OidcServer:BaseUrl' missing from appsettings.json");
+    var internalKey = config["OidcServer:InternalApiKey"]
+        ?? throw new InvalidOperationException(
+            "'OidcServer:InternalApiKey' missing from appsettings.json");
+
+    client.BaseAddress = new Uri(baseUrl);
+    client.Timeout = TimeSpan.FromSeconds(30);
+
+    // Attach the internal API key to every request automatically
+    // so the DirectoryController doesn't have to do it manually
+    client.DefaultRequestHeaders.Add("X-Internal-Key", internalKey);
+})
+.ConfigurePrimaryHttpMessageHandler(() =>
+    new HttpClientHandler
+    {
+        // DEV ONLY: Oidc.Server uses a dev HTTPS cert (self-signed)
+        // Both services run on Windows localhost — safe to bypass here
+        // Remove in production and use a real cert
+        ServerCertificateCustomValidationCallback =
+            HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+    });
 
 builder.Services.AddDistributedMemoryCache();
 

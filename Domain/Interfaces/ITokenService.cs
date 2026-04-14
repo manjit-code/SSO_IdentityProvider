@@ -1,11 +1,11 @@
-﻿using SSO_IdentityProvider.Domain.Entities;
+﻿using Esyasoft.Ldap.Gateway.Domain.Entities;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Domain.Interfaces
+namespace Esyasoft.Ldap.Gateway.Domain.Interfaces
 {
     public interface ITokenService
     {

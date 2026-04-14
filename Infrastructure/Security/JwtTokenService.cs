@@ -1,13 +1,13 @@
 ﻿using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using SSO_IdentityProvider.Domain.Entities;
-using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Infrastructure.Configuration;
+using Esyasoft.Ldap.Gateway.Domain.Entities;
+using Esyasoft.Ldap.Gateway.Domain.Interfaces;
+using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 
-namespace SSO_IdentityProvider.Infrastructure.Security
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Security
 {
     public class JwtTokenService : ITokenService
     {

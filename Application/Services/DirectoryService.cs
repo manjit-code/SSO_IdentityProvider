@@ -1,17 +1,9 @@
 ﻿using Microsoft.Extensions.Options;
-using SSO_IdentityProvider.Domain.Entities;
-using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Infrastructure.Configuration;
-using System;
-using System.Collections.Generic;
-using System.DirectoryServices.Protocols;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Options;
+using Esyasoft.Ldap.Gateway.Domain.Entities;
+using Esyasoft.Ldap.Gateway.Domain.Interfaces;
+using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
 
-namespace SSO_IdentityProvider.Application.Services
+namespace Esyasoft.Ldap.Gateway.Application.Services
 {
     public class DirectoryService
     {
@@ -108,6 +100,30 @@ namespace SSO_IdentityProvider.Application.Services
             var user = await _userRepository.GetMyProfileAsync(connection, username) ?? throw new UnauthorizedAccessException("User not found");
 
             return user;
+        }
+
+        public async Task DeleteUserAsync(string distinguishedName)
+        {
+            if (string.IsNullOrWhiteSpace(distinguishedName))
+                throw new ArgumentException(
+                    "Distinguished name cannot be empty.", nameof(distinguishedName));
+
+            await _userRepository.DeleteUserAsync(distinguishedName);
+        }
+
+        public async Task<CreateConsumerResult> CreateConsumerAsync(CreateConsumerCommand command)
+        {
+            return await _userRepository.CreateConsumerAsync(command);
+        }
+
+        public async Task UpdateConsumerAsync(UpdateConsumerCommand command)
+        {
+            await _userRepository.UpdateConsumerAsync(command);
+        }
+
+        public async Task DeleteConsumerAsync(DeleteConsumerCommand command)
+        {
+            await _userRepository.DeleteConsumerAsync(command);
         }
 
     }

@@ -1,8 +1,9 @@
 ﻿using Microsoft.Extensions.Options;
-using SSO_IdentityProvider.Domain.Entities;
-using SSO_IdentityProvider.Domain.Interfaces;
-using SSO_IdentityProvider.Infrastructure.Configuration;
-using SSO_IdentityProvider.Infrastructure.Mapper;
+using Esyasoft.Ldap.Gateway.Domain.Entities;
+using Esyasoft.Ldap.Gateway.Domain.Interfaces;
+using Esyasoft.Ldap.Gateway.Infrastructure.Configuration;
+using Esyasoft.Ldap.Gateway.Infrastructure.Mapper;
+using Esyasoft.Ldap.Gateway.Infrastructure.Security;
 using System;
 using System.Collections.Generic;
 using System.DirectoryServices.Protocols;
@@ -14,18 +15,21 @@ using System.Text;
 using System.Threading.Tasks;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-namespace SSO_IdentityProvider.Infrastructure.Ldap
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Ldap
 {
     public class LdapUserRepository : IUserRepository
     {
         private readonly LdapSettings _ldapSettings;
         private readonly ILdapAuthenticator _ldapAuthenticator;
         private readonly AttributeMapper _attributeMapper;
-        public LdapUserRepository(IOptions<LdapSettings> option, ILdapAuthenticator ldapAuthenticator, AttributeMapper attributeMapper)
+        private readonly PasswordPolicyValidator _passwordPolicyValidator;
+
+        public LdapUserRepository(IOptions<LdapSettings> option, ILdapAuthenticator ldapAuthenticator, AttributeMapper attributeMapper, PasswordPolicyValidator passwordPolicyValidator)
         {
             _ldapSettings = option.Value;
             _ldapAuthenticator = ldapAuthenticator;
             _attributeMapper = attributeMapper;
+            _passwordPolicyValidator = passwordPolicyValidator;
         }
 
         public async Task<User?> GetByUsernameAsync(LdapConnection connection, string username)
@@ -216,7 +220,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     DisplayName = entry.Attributes[_attributeMapper.MapAttribute("DisplayName")]?[0]?.ToString(),
                     Email = entry.Attributes[_attributeMapper.MapAttribute("Email")]?[0]?.ToString(),
                     Phone = entry.Attributes[_attributeMapper.MapAttribute("Phone")]?[0]?.ToString(),
-                    Department =department,
+                    Department = department,
                     Title = entry.Attributes[_attributeMapper.MapAttribute("Title")]?[0]?.ToString(),
                     Manager = entry.Attributes[_attributeMapper.MapAttribute("Manager")]?[0]?.ToString(),
                     Groups = groups,
@@ -861,7 +865,8 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         }
         public async Task<IEnumerable<string>> GetUserGroupsAsync(LdapConnection connection, string username)
         {
-            return await Task.Run(() => {
+            return await Task.Run(() =>
+            {
 
                 string usernameAttr = _attributeMapper.GetUsernameSearchAttribute();
                 string emailAttr = _attributeMapper.GetEmailSearchAttribute();
@@ -931,7 +936,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
 
                     var descriptionAttrs = ParseDescriptionAttributes(currentDescription);
 
-                    // Update fields from profile
                     if (!string.IsNullOrWhiteSpace(profile.DisplayName))
                     {
                         var mod = new DirectoryAttributeModification
@@ -988,14 +992,12 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     // Rebuild description
                     var newDescParts = new List<string>();
 
-                    // Priority fields first
                     if (descriptionAttrs.TryGetValue("Department", out var dept))
                         newDescParts.Add($"Department: {dept}");
 
                     if (descriptionAttrs.TryGetValue("Account Status", out var status))
                         newDescParts.Add($"Account Status: {status}");
 
-                    // Add all other fields
                     foreach (var kvp in descriptionAttrs.OrderBy(k => k.Key))
                     {
                         if (kvp.Key.Equals("Department", StringComparison.OrdinalIgnoreCase) ||
@@ -1018,7 +1020,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 }
                 else
                 {
-                    // AD handling - direct attribute updates
+                    // AD - direct attribute updates
                     void ReplaceIfProvided(string attr, string? value)
                     {
                         if (string.IsNullOrWhiteSpace(value)) return;
@@ -1032,13 +1034,11 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         modifications.Add(mod);
                     }
 
-                    // Update display name
                     if (!string.IsNullOrWhiteSpace(profile.DisplayName))
                     {
                         ReplaceIfProvided("displayName", profile.DisplayName);
                     }
 
-                    // Update other attributes using mapped names
                     ReplaceIfProvided(_attributeMapper.MapAttribute("Phone"), profile.TelephoneNumber);
                     ReplaceIfProvided("streetAddress", profile.StreetAddress);
                     ReplaceIfProvided("l", profile.City);
@@ -1047,7 +1047,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     ReplaceIfProvided("c", profile.Country);
                 }
 
-                // Apply modifications
                 if (modifications.Any())
                 {
                     var modifyRequest = new ModifyRequest(userDn, modifications.ToArray());
@@ -1055,10 +1054,8 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     Console.WriteLine($"Applied {modifications.Count} updates to {userDn}");
                 }
 
-                // Handle password change if requested
                 if (!string.IsNullOrWhiteSpace(profile.NewPassword))
                 {
-                    ValidatePasswordPolicy(profile.NewPassword);
                     ChangePassword(connection, userDn, profile.NewPassword);
                 }
             });
@@ -1067,8 +1064,12 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             try
             {
+                var username = ExtractUsernameFromDn(userDn);
+                // Validate password against policy first
+                ValidatePasswordPolicy(newPassword, username);
+
                 var passwordAttribute = _attributeMapper.MapAttribute("Password");
-                
+
                 if (_attributeMapper.IsActiveDirectory)
                 {
                     // Use unicodePwd with UTF-16LE encoding
@@ -1156,6 +1157,36 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
         {
             var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
 
+            // Check if department OU exists
+            string departmentOuDn;
+            try
+            {
+                departmentOuDn = DetermineDepartmentOuDn(connection, newUser.Department);
+                Console.WriteLine($"Using department OU: {departmentOuDn}");
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to find department OU: {ex.Message}");
+            }
+
+            string? managerDn = null;
+            if (!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
+            {
+                managerDn = FindUserDn(connection, newUser.ManagerEmail);
+                if (managerDn == null)
+                {
+                    throw new InvalidOperationException($"Manager user '{newUser.ManagerEmail}' does not exist.");
+                }
+            }
+            ;
+
+            if (!string.IsNullOrWhiteSpace(newUser.Country) && newUser.Country.Length != 2)
+            {
+                throw new InvalidOperationException(
+                    "Country must be a 2-letter ISO code (e.g., IN, US, GB)."
+                );
+            }
+
             // Generate username based on LDAP type
             string username;
             string userRdn; // RDN (Relative Distinguished Name)
@@ -1181,38 +1212,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 userRdn = $"uid={EscapeDnValue(username)}";
             }
 
-            // Check if department OU exists
-            string departmentOuDn;
-            try
-            {
-                departmentOuDn = DetermineDepartmentOuDn(connection, newUser.Department);
-                Console.WriteLine($"Using department OU: {departmentOuDn}");
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException($"Failed to find department OU: {ex.Message}");
-            }
-
-            string? managerDn = null;
-            if (!string.IsNullOrWhiteSpace(newUser.ManagerEmail))
-            {
-                managerDn = FindUserDn(connection, newUser.ManagerEmail);
-                if (managerDn == null)
-                {
-                    throw new InvalidOperationException($"Manager user '{newUser.ManagerEmail}' does not exist.");
-                }
-            };
-
-            if (!string.IsNullOrWhiteSpace(newUser.Country) && newUser.Country.Length != 2)
-            {
-                throw new InvalidOperationException(
-                    "Country must be a 2-letter ISO code (e.g., IN, US, GB)."
-                );
-            }
-
-
-            // Generate credentials
-            var email = $"{username}@{_ldapSettings.Domain}";
+            var email = $"{username}@{_ldapSettings.EmailFormat}";
             var userDn = $"{userRdn},{departmentOuDn}";
             var password = GenerateStrongPassword();
 
@@ -1221,6 +1221,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 throw new InvalidOperationException("A user cannot be their own manager.");
             }
+
             // Split name for attributes
             var nameParts = newUser.FullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             var firstName = nameParts.Length > 0 ? nameParts[0] : "";
@@ -1238,7 +1239,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 attributes.Add(new DirectoryAttribute("givenName", firstName));
                 attributes.Add(new DirectoryAttribute("sn", lastName));
                 attributes.Add(new DirectoryAttribute("sAMAccountName", username));
-                attributes.Add(new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.Domain}"));
+                attributes.Add(new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.EmailFormat}"));
                 attributes.Add(new DirectoryAttribute("mail", email));
                 attributes.Add(new DirectoryAttribute("displayName", newUser.FullName));
 
@@ -1348,7 +1349,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 {
                     attributes.Add(new DirectoryAttribute("postalCode", newUser.PostalCode));
                 }
-                
+
             }
 
             try
@@ -1363,7 +1364,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 if (_attributeMapper.IsActiveDirectory)
                 {
                     // AD: Set password and enable account
-                    await Task.Delay(200); // Brief delay for AD replication
+                    await Task.Delay(200);
 
                     try
                     {
@@ -1385,7 +1386,6 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     catch (Exception ex)
                     {
                         Console.WriteLine($"Warning: Failed to set password/enable AD account: {ex.Message}");
-                        // Continue anyway - admin can fix manually
                     }
                 }
                 else
@@ -1443,7 +1443,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                         new DirectoryAttribute("cn", newUser.FullName),
                         new DirectoryAttribute("sn", lastName),
                         new DirectoryAttribute("sAMAccountName", username),
-                        new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.Domain}"),
+                        new DirectoryAttribute("userPrincipalName", $"{username}@{_ldapSettings.EmailFormat}"),
                         new DirectoryAttribute("userAccountControl", "514") // Disabled initially
                     };
 
@@ -1476,7 +1476,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     {
                         Username = username,
                         InitialPassword = password,
-                        Email = $"{username}@{_ldapSettings.Domain}",
+                        Email = $"{username}@{_ldapSettings.EmailFormat}",
                         DistinguishedName = userDn
                     };
                 }
@@ -2079,11 +2079,14 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                 Console.WriteLine($"Applied {modifications.Count} attribute updates");
             }
         }
-        private bool ValidatePasswordPolicy(string password)
+        private bool ValidatePasswordPolicy(string password, string? username = null)
         {
-            if (password.Length < 8)
+            var validationResult = _passwordPolicyValidator.ValidatePassword(password, username);
+
+            if (!validationResult.IsValid)
             {
-                throw new InvalidOperationException("Password must be at least 8 characters long.");
+                var errors = string.Join("; ", validationResult.Errors);
+                throw new InvalidOperationException($"Password validation failed: {errors}");
             }
 
             return true;
@@ -2488,7 +2491,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
                     mod.Add(managerDn);
                     modifications.Add(mod);
                 }
-                
+
 
                 if (modifications.Any())
                 {
@@ -2875,7 +2878,7 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             {
                 //var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
                 var connection = _ldapAuthenticator.BindAsInfraServiceAccountForWrite();
-                
+
                 // Check if trying to delete critical OU
                 var criticalOus = new[]
                 {
@@ -2961,5 +2964,653 @@ namespace SSO_IdentityProvider.Infrastructure.Ldap
             }
         }
 
+
+        public async Task DeleteUserAsync(string distinguishedName)
+        {
+            if (string.IsNullOrWhiteSpace(distinguishedName))
+                throw new ArgumentException("Distinguished name cannot be empty.", nameof(distinguishedName));
+
+            await Task.Run(() =>
+            {
+                // Use write service account — same connection type used by
+                // CreateUserAsync, UpdateUserStatusAsync, UpdateUserAsAdminAsync
+                var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+                try
+                {
+                    var deleteRequest = new DeleteRequest(distinguishedName);
+                    connection.SendRequest(deleteRequest);
+
+                    Console.WriteLine($"[LdapUserRepository] DeleteUserAsync: removed {distinguishedName}");
+                }
+                catch (DirectoryOperationException ex)
+                {
+                    // Log the specific LDAP error code for diagnostics
+                    Console.WriteLine(
+                        $"[LdapUserRepository] DeleteUserAsync failed for {distinguishedName}. " +
+                        $"LDAP error: {ex.Message}. " +
+                        $"Response code: {ex.Response?.ResultCode}");
+                    throw new InvalidOperationException(
+                        $"Failed to delete LDAP user '{distinguishedName}': {ex.Message}", ex);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Reads pwdAccountLockedTime from OpenLDAP ppolicy to determine
+        /// if the account is locked and how long the lockout lasts.
+        ///
+        /// CALLED BY: AuthenticationService.LoginDetailedAsync()
+        ///            AuthenticationService.GetLockoutStatusAsync()
+        ///
+        /// DOES NOT take a LdapConnection parameter because lockout checks
+        /// need to happen independently of the user BIND flow — we need
+        /// to check lockout status BEFORE attempting a BIND (to avoid
+        /// incrementing the failure counter on an already locked account)
+        /// and AFTER a failed BIND (to report fresh lockout info).
+        ///
+        /// Uses its own service account connection internally.
+        ///
+        /// OpenLDAP ppolicy lockout format:
+        ///   pwdAccountLockedTime = "yyyyMMddHHmmssZ" (generalized time)
+        ///   "000001010000Z" = permanently locked (epoch zero)
+        ///   Absent or empty = not locked
+        ///
+        /// Your ppolicy settings (from our earlier work):
+        ///   pwdMaxFailure: 3
+        ///   pwdLockoutDuration: 600 (seconds)
+        /// </summary>
+        public Task<(bool IsLocked, int? RemainingSeconds)> ReadLockoutStatusAsync(
+            string userDn)
+        {
+            // Use Task.Run with explicit return type to avoid CS8030.
+            // The compiler cannot infer the tuple return type from an
+            // anonymous lambda inside Task.Run — the explicit generic
+            // parameter fixes this.
+            return Task.Run<(bool IsLocked, int? RemainingSeconds)>(() =>
+            {
+                try
+                {
+                    using var connection = _ldapAuthenticator.BindAsServiceAccount();
+
+                    var searchRequest = new SearchRequest(
+                        userDn,
+                        "(objectClass=*)",
+                        SearchScope.Base,
+                        "pwdAccountLockedTime",
+                        "pwdFailureTime"
+                    );
+
+                    var response = (SearchResponse)connection.SendRequest(searchRequest);
+                    var entry = response.Entries
+                        .Cast<SearchResultEntry>()
+                        .FirstOrDefault();
+
+                    if (entry == null)
+                        return (false, null);
+
+                    if (!entry.Attributes.Contains("pwdAccountLockedTime"))
+                        return (false, null);
+
+                    var lockedTimeStr = entry.Attributes["pwdAccountLockedTime"][0]
+                        ?.ToString();
+
+                    if (string.IsNullOrEmpty(lockedTimeStr))
+                        return (false, null);
+
+                    // "000001010000Z" = permanently locked (OpenLDAP convention)
+                    if (lockedTimeStr == "000001010000Z")
+                        return (true, -1);
+
+                    // Parse generalized time: yyyyMMddHHmmssZ
+                    if (DateTime.TryParseExact(
+                            lockedTimeStr,
+                            "yyyyMMddHHmmssZ",
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.AssumeUniversal |
+                            System.Globalization.DateTimeStyles.AdjustToUniversal,
+                            out var lockedAt))
+                    {
+                        // pwdLockoutDuration = 600 seconds (your ppolicy config)
+                        const int LockoutDurationSeconds = 600;
+
+                        var unlockAt = lockedAt.AddSeconds(LockoutDurationSeconds);
+                        var remaining = (int)(unlockAt - DateTime.UtcNow).TotalSeconds;
+
+                        if (remaining > 0)
+                            return (true, remaining);
+
+                        // Lockout window has passed — account is usable again
+                        return (false, null);
+                    }
+
+                    // Could not parse the timestamp — treat conservatively as locked
+                    Console.WriteLine(
+                        $"[ReadLockoutStatus] Could not parse pwdAccountLockedTime " +
+                        $"'{lockedTimeStr}' for {userDn}. Treating as locked.");
+                    return (true, -1);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[ReadLockoutStatus] Error reading ppolicy for {userDn}: " +
+                        $"{ex.Message}");
+
+                    // Fail open — if we cannot read lockout status, do not
+                    // block the user. The BIND attempt will surface the real error.
+                    return (false, null);
+                }
+            }
+            );
+        }
+
+
+        /// <summary>
+        /// Creates a consumer user in OpenLDAP with all fields from
+        /// CreateConsumerCommand, then returns a CreateConsumerResult
+        /// containing the generated username, email, password, DN,
+        /// and name parts.
+        ///
+        /// DIFFERENCE from CreateUserAsync:
+        ///   CreateUserAsync takes CreateUserCommand (legacy, fewer fields).
+        ///   CreateConsumerAsync takes CreateConsumerCommand (full fields
+        ///   including gender, emptype, branch etc. — these are NOT stored
+        ///   in LDAP but are returned in the result so DirectoryService can
+        ///   pass them to Oidc.Server for PostgreSQL insertion).
+        ///   
+        /// </summary>
+        public async Task<CreateConsumerResult> CreateConsumerAsync(
+            CreateConsumerCommand command)
+        {
+            var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+            // ── Validate department OU exists ─────────────────────────
+            string departmentOuDn;
+            try
+            {
+                departmentOuDn = DetermineDepartmentOuDn(connection, command.Department);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to find department OU: {ex.Message}");
+            }
+
+            // ── Resolve manager DN if provided ────────────────────────
+            string? managerDn = null;
+            if (!string.IsNullOrWhiteSpace(command.ManagerEmail))
+            {
+                managerDn = FindUserDn(connection, command.ManagerEmail);
+                if (managerDn == null) throw new InvalidOperationException($"Manager '{command.ManagerEmail}' does not exist.");
+            }
+
+            // ── Validate country format ───────────────────────────────
+            if (!string.IsNullOrWhiteSpace(command.Country) && command.Country.Length != 2)
+                throw new InvalidOperationException("Country must be a 2-letter ISO code (e.g., IN, US, GB).");
+
+            // ── Generate uid / username ───────────────────────────────
+            string username;
+            string userRdn;
+
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                username = GenerateSamAccountName(command.FullName);
+                if (UserExistsBySamAccountName(connection, username))
+                {
+                    throw new InvalidOperationException($"User '{username}' already exists.");
+                }
+
+                var commonName = GenerateCommonName(command.FullName);
+                userRdn = $"CN={EscapeDnValue(commonName)}";
+            }
+            else
+            {
+                username = GenerateUid(command.FullName);
+                if (UserExistsByUid(connection, username))
+                {
+                    throw new InvalidOperationException($"User '{username}' already exists.");
+                }
+                userRdn = $"uid={EscapeDnValue(username)}";
+            }
+
+            // ── Derive values ─────────────────────────────────────────
+            var email = $"{username}@{_ldapSettings.EmailFormat}";
+            var userDn = $"{userRdn},{departmentOuDn}";
+            var password = GenerateStrongPassword();
+            var nameParts = command.FullName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var firstName = nameParts.Length > 0 ? nameParts[0] : "";
+            var lastName = nameParts.Length > 1 ? nameParts[^1] : firstName;
+
+            // ── Prevent self-management ───────────────────────────────
+            if (managerDn != null && managerDn.Equals(userDn, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("A user cannot be their own manager.");
+
+            // ── Build LDAP attributes ─────────────────────────────────
+            var attributes = new List<DirectoryAttribute>();
+
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                attributes.Add(new DirectoryAttribute("objectClass",
+                    new[] { "top", "person", "organizationalPerson", "user" }));
+                attributes.Add(new DirectoryAttribute("cn", command.FullName));
+                attributes.Add(new DirectoryAttribute("name", command.FullName));
+                attributes.Add(new DirectoryAttribute("givenName", firstName));
+                attributes.Add(new DirectoryAttribute("sn", lastName));
+                attributes.Add(new DirectoryAttribute("sAMAccountName", username));
+                attributes.Add(new DirectoryAttribute("userPrincipalName",
+                    $"{username}@{_ldapSettings.EmailFormat}"));
+                attributes.Add(new DirectoryAttribute("mail", email));
+                attributes.Add(new DirectoryAttribute("displayName", command.FullName));
+                attributes.Add(new DirectoryAttribute("userAccountControl", "514"));
+
+                if (!string.IsNullOrWhiteSpace(command.Department))
+                    attributes.Add(new DirectoryAttribute("department", command.Department));
+                if (!string.IsNullOrWhiteSpace(command.Title))
+                    attributes.Add(new DirectoryAttribute("title", command.Title));
+                if (!string.IsNullOrWhiteSpace(command.TelephoneNumber))
+                    attributes.Add(new DirectoryAttribute("telephoneNumber",
+                        command.TelephoneNumber));
+                if (managerDn != null)
+                    attributes.Add(new DirectoryAttribute("manager", managerDn));
+                if (!string.IsNullOrWhiteSpace(command.StreetAddress))
+                    attributes.Add(new DirectoryAttribute("streetAddress",
+                        command.StreetAddress));
+                if (!string.IsNullOrWhiteSpace(command.City))
+                    attributes.Add(new DirectoryAttribute("l", command.City));
+                if (!string.IsNullOrWhiteSpace(command.State))
+                    attributes.Add(new DirectoryAttribute("st", command.State));
+                if (!string.IsNullOrWhiteSpace(command.PostalCode))
+                    attributes.Add(new DirectoryAttribute("postalCode", command.PostalCode));
+                if (!string.IsNullOrWhiteSpace(command.Country))
+                    attributes.Add(new DirectoryAttribute("c",
+                        command.Country.ToUpper()));
+            }
+            else
+            {
+                // ── OpenLDAP ──────────────────────────────────────────
+                attributes.Add(new DirectoryAttribute("objectClass",
+                    new[] { "top", "person", "organizationalPerson", "inetOrgPerson" }));
+                attributes.Add(new DirectoryAttribute("cn", command.FullName));
+                attributes.Add(new DirectoryAttribute("givenName", firstName));
+                attributes.Add(new DirectoryAttribute("sn", lastName));
+                attributes.Add(new DirectoryAttribute("uid", username));
+                attributes.Add(new DirectoryAttribute("userPassword",
+                    GenerateSSHAHash(password)));
+                attributes.Add(new DirectoryAttribute("mail", email));
+
+                // Build rich description string for OpenLDAP
+                // (department, status, address fields all live here)
+                var descParts = new List<string>();
+                if (!string.IsNullOrWhiteSpace(command.Department))
+                    descParts.Add($"Department: {command.Department}");
+                descParts.Add("Account Status: Active");
+                if (!string.IsNullOrWhiteSpace(command.StreetAddress))
+                    descParts.Add($"Street: {command.StreetAddress}");
+                if (!string.IsNullOrWhiteSpace(command.City))
+                    descParts.Add($"City: {command.City}");
+                if (!string.IsNullOrWhiteSpace(command.State))
+                    descParts.Add($"State: {command.State}");
+                if (!string.IsNullOrWhiteSpace(command.PostalCode))
+                    descParts.Add($"PostalCode: {command.PostalCode}");
+                if (!string.IsNullOrWhiteSpace(command.Country))
+                {
+                    string countryName = command.Country.ToUpper() switch
+                    {
+                        "IN" => "India",
+                        "US" => "United States",
+                        "UK" => "United Kingdom",
+                        "CA" => "Canada",
+                        "AU" => "Australia",
+                        "DE" => "Germany",
+                        "FR" => "France",
+                        "JP" => "Japan",
+                        "CN" => "China",
+                        _ => command.Country
+                    };
+                    descParts.Add($"Country: {countryName}");
+                }
+
+                attributes.Add(new DirectoryAttribute("description",
+                    string.Join("; ", descParts)));
+
+                if (!string.IsNullOrWhiteSpace(command.Title))
+                    attributes.Add(new DirectoryAttribute("title", command.Title));
+                if (!string.IsNullOrWhiteSpace(command.TelephoneNumber))
+                    attributes.Add(new DirectoryAttribute("telephoneNumber",
+                        command.TelephoneNumber));
+                if (managerDn != null)
+                    attributes.Add(new DirectoryAttribute("manager", managerDn));
+                if (!string.IsNullOrWhiteSpace(command.StreetAddress))
+                    attributes.Add(new DirectoryAttribute("streetAddress",
+                        command.StreetAddress));
+                if (!string.IsNullOrWhiteSpace(command.City))
+                    attributes.Add(new DirectoryAttribute("l", command.City));
+                if (!string.IsNullOrWhiteSpace(command.State))
+                    attributes.Add(new DirectoryAttribute("st", command.State));
+                if (!string.IsNullOrWhiteSpace(command.PostalCode))
+                    attributes.Add(new DirectoryAttribute("postalCode",
+                        command.PostalCode));
+            }
+
+            // ── Send AddRequest ───────────────────────────────────────
+            var addRequest = new AddRequest(userDn, attributes.ToArray());
+            connection.SendRequest(addRequest);
+            Console.WriteLine($"[CreateConsumerAsync] LDAP user created: {userDn}");
+
+            // ── AD: set password + enable ─────────────────────────────
+            if (_attributeMapper.IsActiveDirectory)
+            {
+                await Task.Delay(200);
+                try
+                {
+                    ChangePasswordAD(connection, userDn, password);
+                    var enableMod = new DirectoryAttributeModification
+                    {
+                        Name = "userAccountControl",
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    enableMod.Add("512");
+                    connection.SendRequest(new ModifyRequest(userDn, enableMod));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[CreateConsumerAsync] Warning: AD password/enable failed: {ex.Message}");
+                }
+            }
+
+            return new CreateConsumerResult
+            {
+                Username = username,
+                Email = email,
+                InitialPassword = password,
+                DistinguishedName = userDn,
+                FirstName = firstName,
+                LastName = lastName
+            };
+        }
+
+        /// <summary>
+        /// Updates a consumer user in LDAP Server.
+        /// Only non-null fields are updated.
+        /// If Department changes → moves user to the new OU.
+        /// If ManagerEmail changes → updates manager DN.
+        /// 
+        /// Does NOT touch PostgreSQL — that is handled by
+        /// DirectoryService via Oidc.Server internal endpoint.
+        /// </summary>
+        public async Task UpdateConsumerAsync(UpdateConsumerCommand command)
+        {
+            await Task.Run(() =>
+            {
+                var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+                // ── Resolve user DN ───────────────────────────────────
+                var user = GetByUsernameAsync(connection, command.Username).Result;
+                if (user == null)
+                    throw new InvalidOperationException($"User '{command.Username}' not found in LDAP.");
+
+                var userDn = user.DistinguishedName;
+                var modifications = new List<DirectoryAttributeModification>();
+
+                // ── Department change → OU move ───────────────────────
+                string? newUserDn = null;
+                if (!string.IsNullOrWhiteSpace(command.Department))
+                {
+                    try
+                    {
+                        var targetOuDn = GetDepartmentOuDnAsync(connection, command.Department);
+                        var currentParent = GetParentOuDn(userDn);
+
+                        if (!string.Equals(currentParent, targetOuDn,StringComparison.OrdinalIgnoreCase))
+                        {
+                            MoveUserToOu(connection, userDn, targetOuDn);
+                            var uid = ExtractUidFromDn(userDn);
+                            newUserDn = $"uid={uid},{targetOuDn}";
+                            Console.WriteLine($"[UpdateConsumerAsync] Moved to OU: {targetOuDn}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[UpdateConsumerAsync] OU move failed: {ex.Message}");
+                    }
+                }
+
+                var effectiveUserDn = newUserDn ?? userDn;
+
+                // ── Build LDAP modifications ──────────────────────────
+                void AddReplace(string attr, string? value)
+                {
+                    if (string.IsNullOrWhiteSpace(value)) return;
+                    var mod = new DirectoryAttributeModification
+                    {
+                        Name = attr,
+                        Operation = DirectoryAttributeOperation.Replace
+                    };
+                    mod.Add(value);
+                    modifications.Add(mod);
+                }
+
+                if (_attributeMapper.IsActiveDirectory)
+                {
+                    AddReplace("displayName", command.DisplayName);
+                    AddReplace("mail", command.Email);
+                    AddReplace("title", command.Title);
+                    AddReplace("telephoneNumber", command.TelephoneNumber);
+                    AddReplace("streetAddress", command.StreetAddress);
+                    AddReplace("l", command.City);
+                    AddReplace("st", command.State);
+                    AddReplace("postalCode", command.PostalCode);
+                    if (!string.IsNullOrWhiteSpace(command.Country))
+                        AddReplace("c", command.Country.ToUpper());
+                    if (!string.IsNullOrWhiteSpace(command.Department))
+                        AddReplace("department", command.Department);
+                    if (!string.IsNullOrWhiteSpace(command.ManagerEmail))
+                    {
+                        var managerDn = FindUserDn(connection, command.ManagerEmail)
+                            ?? throw new InvalidOperationException("Manager not found.");
+                        AddReplace("manager", managerDn);
+                    }
+                }
+                else
+                {
+                    // ── OpenLDAP: direct attributes ───────────────────
+                    if (!string.IsNullOrWhiteSpace(command.DisplayName))
+                        AddReplace("cn", command.DisplayName);
+                    if (!string.IsNullOrWhiteSpace(command.Email))
+                        AddReplace("mail", command.Email);
+                    AddReplace("title", command.Title);
+                    AddReplace("telephoneNumber", command.TelephoneNumber);
+
+                    if (!string.IsNullOrWhiteSpace(command.ManagerEmail))
+                    {
+                        var managerDn = FindUserDn(connection, command.ManagerEmail)
+                            ?? throw new InvalidOperationException("Manager not found.");
+                        AddReplace("manager", managerDn);
+                    }
+
+                    // ── OpenLDAP: rebuild description string ──────────
+                    // Fetch current description first so we preserve existing
+                    // values for fields not being updated
+                    var searchRequest = new SearchRequest(
+                        effectiveUserDn,
+                        "(objectClass=inetOrgPerson)",
+                        SearchScope.Base,
+                        "description");
+                    var searchResponse = (SearchResponse)connection.SendRequest(searchRequest);
+                    var entry = searchResponse.Entries.Cast<SearchResultEntry>().FirstOrDefault();
+
+                    string currentDesc = entry != null &&
+                        entry.Attributes.Contains("description")
+                        ? entry.Attributes["description"][0]?.ToString() ?? ""
+                        : "";
+
+                    var descAttrs = ParseDescriptionAttributes(currentDesc);
+
+                    // Update only provided fields
+                    if (!string.IsNullOrWhiteSpace(command.Department))
+                        descAttrs["Department"] = command.Department;
+                    if (!string.IsNullOrWhiteSpace(command.StreetAddress))
+                        descAttrs["Street"] = command.StreetAddress;
+                    if (!string.IsNullOrWhiteSpace(command.City))
+                        descAttrs["City"] = command.City;
+                    if (!string.IsNullOrWhiteSpace(command.State))
+                        descAttrs["State"] = command.State;
+                    if (!string.IsNullOrWhiteSpace(command.PostalCode))
+                        descAttrs["PostalCode"] = command.PostalCode;
+                    if (!string.IsNullOrWhiteSpace(command.Country))
+                    {
+                        string countryName = command.Country.ToUpper() switch
+                        {
+                            "IN" => "India",
+                            "US" => "United States",
+                            "UK" => "United Kingdom",
+                            "CA" => "Canada",
+                            "AU" => "Australia",
+                            "DE" => "Germany",
+                            "FR" => "France",
+                            "JP" => "Japan",
+                            "CN" => "China",
+                            _ => command.Country
+                        };
+                        descAttrs["Country"] = countryName;
+                    }
+
+                    // Rebuild — always keep Department and Account Status first
+                    var descParts = new List<string>();
+                    if (descAttrs.TryGetValue("Department", out var dept))
+                        descParts.Add($"Department: {dept}");
+                    if (descAttrs.TryGetValue("Account Status", out var status))
+                        descParts.Add($"Account Status: {status}");
+
+                    foreach (var kvp in descAttrs.OrderBy(k => k.Key))
+                    {
+                        if (kvp.Key.Equals("Department",
+                                StringComparison.OrdinalIgnoreCase) ||
+                            kvp.Key.Equals("Account Status",
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        descParts.Add($"{kvp.Key}: {kvp.Value}");
+                    }
+
+                    if (descParts.Any())
+                    {
+                        var descMod = new DirectoryAttributeModification
+                        {
+                            Name = "description",
+                            Operation = DirectoryAttributeOperation.Replace
+                        };
+                        descMod.Add(string.Join("; ", descParts));
+                        modifications.Add(descMod);
+                    }
+
+                    // Street address as direct attribute too
+                    AddReplace("streetAddress", command.StreetAddress);
+                    AddReplace("l", command.City);
+                    AddReplace("st", command.State);
+                    AddReplace("postalCode", command.PostalCode);
+                }
+
+                // ── Apply modifications ───────────────────────────────
+                if (modifications.Any())
+                {
+                    connection.SendRequest(
+                        new ModifyRequest(effectiveUserDn, modifications.ToArray()));
+                    Console.WriteLine(
+                        $"[UpdateConsumerAsync] Applied {modifications.Count} " +
+                        $"updates to {effectiveUserDn}");
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"[UpdateConsumerAsync] No LDAP modifications for " +
+                        $"{command.Username}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Deletes a consumer user from OpenLDAP by username.
+        ///
+        /// Flow:
+        ///   1. Bind as service account (write permissions)
+        ///   2. Search for the user by uid to get their DN
+        ///   3. Send a DeleteRequest using the resolved DN
+        ///
+        /// Why resolve DN here instead of accepting it as input?
+        ///   The caller (DirectoryService / DirectoryController) only
+        ///   knows the username — not the full DN. The DN depends on
+        ///   which department OU the user lives in, and that is an
+        ///   LDAP-internal concern. The repository knows how to find it.
+        ///
+        /// Throws:
+        ///   InvalidOperationException → user not found in LDAP
+        ///   InvalidOperationException → LDAP delete operation failed
+        /// </summary>
+        public async Task DeleteConsumerAsync(DeleteConsumerCommand command)
+        {
+            if (string.IsNullOrWhiteSpace(command.Username))
+                throw new ArgumentException(
+                    "Username cannot be empty.", nameof(command));
+
+            await Task.Run(() =>
+            {
+                // ── Step 1: Bind as service account ───────────────────
+                // Uses BindAsServiceAccountForWrite() — same account used
+                // by CreateConsumerAsync, UpdateConsumerAsync etc.
+                var connection = _ldapAuthenticator.BindAsServiceAccountForWrite();
+
+                // ── Step 2: Resolve the user's DN by uid ──────────────
+                // We search the entire tree because we don't know which
+                // department OU the user is in.
+                var searchRequest = new SearchRequest(
+                    _ldapSettings.BaseDn,
+                    $"(uid={Escape(command.Username)})",
+                    SearchScope.Subtree,
+                    "distinguishedName"
+                );
+
+                var searchResponse =
+                    (SearchResponse)connection.SendRequest(searchRequest);
+
+                var entry = searchResponse.Entries
+                    .Cast<SearchResultEntry>()
+                    .FirstOrDefault();
+
+                if (entry == null)
+                {
+                    throw new InvalidOperationException(
+                        $"User '{command.Username}' not found in LDAP. " +
+                        $"Cannot delete a user that does not exist.");
+                }
+
+                var userDn = entry.DistinguishedName;
+
+                Console.WriteLine(
+                    $"[DeleteConsumerAsync] Found user '{command.Username}' " +
+                    $"at DN: {userDn}");
+
+                // ── Step 3: Delete the LDAP entry ─────────────────────
+                try
+                {
+                    var deleteRequest = new DeleteRequest(userDn);
+                    connection.SendRequest(deleteRequest);
+
+                    Console.WriteLine(
+                        $"[DeleteConsumerAsync] Successfully deleted " +
+                        $"'{command.Username}' from LDAP. DN: {userDn}");
+                }
+                catch (DirectoryOperationException ex)
+                {
+                    Console.WriteLine(
+                        $"[DeleteConsumerAsync] LDAP delete failed for " +
+                        $"'{command.Username}'. Error: {ex.Message}. " +
+                        $"ResultCode: {ex.Response?.ResultCode}");
+
+                    throw new InvalidOperationException(
+                        $"Failed to delete user '{command.Username}' " +
+                        $"from LDAP: {ex.Message}", ex);
+                }
+            });
+        }
     }
 }

@@ -3,7 +3,7 @@ using System.ComponentModel.DataAnnotations;
 using System.DirectoryServices.Protocols;
 using System.Text.Json.Serialization;
 
-namespace SSO_IdentityProvider.API.DTOs
+namespace Esyasoft.Ldap.Gateway.API.DTOs
 {
     public class SearchUsersRequest
     {

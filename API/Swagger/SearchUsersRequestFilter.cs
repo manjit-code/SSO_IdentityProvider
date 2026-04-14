@@ -1,8 +1,8 @@
 ﻿using Microsoft.OpenApi.Models;
-using SSO_IdentityProvider.API.DTOs;
+using Esyasoft.Ldap.Gateway.API.DTOs;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
-namespace SSO_IdentityProvider.API.Swagger
+namespace Esyasoft.Ldap.Gateway.API.Swagger
 {
     public class SearchUsersRequestFilter : ISchemaFilter
     {

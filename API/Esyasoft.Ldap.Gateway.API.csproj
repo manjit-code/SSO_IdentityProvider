@@ -13,9 +13,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Application\SSO_IdentityProvider.Application.csproj" />
-    <ProjectReference Include="..\Domain\SSO_IdentityProvider.Domain.csproj" />
-    <ProjectReference Include="..\Infrastructure\SSO_IdentityProvider.Infrastructure.csproj" />
+    <ProjectReference Include="..\Application\Esyasoft.Ldap.Gateway.Application.csproj" />
+    <ProjectReference Include="..\Domain\Esyasoft.Ldap.Gateway.Domain.csproj" />
+    <ProjectReference Include="..\Infrastructure\Esyasoft.Ldap.Gateway.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

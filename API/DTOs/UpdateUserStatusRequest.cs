@@ -1,4 +1,4 @@
-﻿namespace SSO_IdentityProvider.API.DTOs
+﻿namespace Esyasoft.Ldap.Gateway.API.DTOs
 {
     public class UpdateUserStatusRequest
     {

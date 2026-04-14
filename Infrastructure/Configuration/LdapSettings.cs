@@ -1,11 +1,11 @@
-﻿using SSO_IdentityProvider.Infrastructure.Mapper;
+﻿using Esyasoft.Ldap.Gateway.Infrastructure.Mapper;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Infrastructure.Configuration
+namespace Esyasoft.Ldap.Gateway.Infrastructure.Configuration
 {
     public class LdapSettings
     {
@@ -18,7 +18,7 @@ namespace SSO_IdentityProvider.Infrastructure.Configuration
         public string username { get; set; } = string.Empty;
         public string password { get; set; } = string.Empty;
 
-
+        public string EmailFormat { get; set; } = string.Empty;
         public LdapType LdapType { get; set; } = LdapType.OpenLDAP;
 
         // Attribute mapping configuration

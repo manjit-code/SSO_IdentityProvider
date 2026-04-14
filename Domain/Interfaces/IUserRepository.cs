@@ -1,4 +1,4 @@
-﻿using SSO_IdentityProvider.Domain.Entities;
+﻿using Esyasoft.Ldap.Gateway.Domain.Entities;
 using System;
 using System.Collections.Generic;
 using System.DirectoryServices.Protocols;
@@ -6,7 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SSO_IdentityProvider.Domain.Interfaces
+namespace Esyasoft.Ldap.Gateway.Domain.Interfaces
 {
     public interface IUserRepository
     {
@@ -26,5 +26,11 @@ namespace SSO_IdentityProvider.Domain.Interfaces
 
         Task CreateOuAsync(CreateOuCommand command);
         Task DeleteOuAsync(DeleteOuCommand command);
+
+        Task DeleteUserAsync(string distinguishedName);
+        Task<(bool IsLocked, int? RemainingSeconds)> ReadLockoutStatusAsync(string userDn);
+        Task<CreateConsumerResult> CreateConsumerAsync(CreateConsumerCommand command);
+        Task UpdateConsumerAsync(UpdateConsumerCommand command);
+        Task DeleteConsumerAsync(DeleteConsumerCommand command);
     }
 }
